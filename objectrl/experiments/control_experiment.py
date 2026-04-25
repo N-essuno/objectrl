@@ -214,6 +214,8 @@ class ControlExperiment(Experiment):
 
                 if self._discrete_action_space:
                     actions = actions.int()
+                else:
+                    actions = actions.clip(-1.0, 1.0)
 
                 next_states, rewards, term, trunc, _ = self.eval_env.step(
                     tonumpy(actions)
@@ -240,6 +242,8 @@ class ControlExperiment(Experiment):
                     action = self.agent.select_action(state, is_training=False)[
                         "action"
                     ]
+                    if not self._discrete_action_space:
+                        action = action.clip(-1.0, 1.0)
 
                     # Execute action in the environment
                     next_state, reward, term, trunc, info = self.eval_env.step(
