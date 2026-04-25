@@ -51,6 +51,12 @@ if typing.TYPE_CHECKING:
     from objectrl.config.config import MainConfig
 
 
+def _mps_is_available() -> bool:
+    """Return whether Apple Metal (MPS) backend is available."""
+    mps_backend = getattr(torch.backends, "mps", None)
+    return bool(mps_backend and mps_backend.is_available())
+
+
 def enhanced_asdict(obj: Any) -> dict:
     """
     Convert a dataclass instance to a dictionary, including both declared fields
@@ -333,6 +339,21 @@ def setup_config(
 
     # Final config consistency checks
     assert config.model.name != "abstract", "No model specified"
+
+    # If CUDA is unavailable and runtime device was not explicitly configured,
+    # fall back to CPU when data is already configured to be stored on CPU.
+    system_overrides = subset_tyro.get("system", {})
+    has_device_override = (
+        isinstance(system_overrides, dict) and "device" in system_overrides
+    )
+    if (
+        not torch.cuda.is_available()
+        and config.system.device == "cuda"
+        and not has_device_override
+        and config.system.storing_device == "cpu"
+    ):
+        config.system.device = "cpu"
+
     # Check for correct device choice
     if not torch.cuda.is_available():
         if config.system.storing_device == "cuda":
@@ -342,6 +363,15 @@ def setup_config(
         if config.system.device == "cuda":
             raise RuntimeError(
                 "Found no NVIDIA GPU available on this device. Rerun with '--system.device=cpu' to avoid this error."
+            )
+    if not _mps_is_available():
+        if config.system.storing_device == "mps":
+            raise RuntimeError(
+                "Found no Apple Metal (MPS) backend available on this device. Rerun with '--system.storing_device=cpu' to avoid this error."
+            )
+        if config.system.device == "mps":
+            raise RuntimeError(
+                "Found no Apple Metal (MPS) backend available on this device. Rerun with '--system.device=cpu' to avoid this error."
             )
 
     # Check for accessibility of path

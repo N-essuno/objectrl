@@ -81,6 +81,7 @@ class EnvConfig:
         position_delay (float | None): Optional delay in position updates.
         control_cost_weight (float | ): Optional weight for control cost penalty.
         sparse_rewards (bool): Whether to use sparse rewards.
+        render (bool): Whether to render environment frames during train/eval.
     """
 
     name: (
@@ -93,11 +94,17 @@ class EnvConfig:
             "reacher",
             "swimmer",
             "walker2d",
+            "car-racing",
+            "car_racing",
             "dmc-quadruped-run",
             "dmc-humanoid-run",
             "dmc-cheetah-run",
             "dmc-hopper-hop",
             "dmc-walker-run",
+            "dmc-cartpole-swingup",
+            "dmc-acrobot-swingup",
+            "cartpole-swingup-v0",
+            "acrobot-swingup-v0",
             "metaworld-window-close",
             "metaworld-window-open",
             "metaworld-drawer-close",
@@ -112,6 +119,7 @@ class EnvConfig:
     position_delay: float | None = None
     control_cost_weight: float | None = None
     sparse_rewards: bool = False
+    render: bool = False
 
 
 # [end-env-config]
@@ -161,8 +169,8 @@ class SystemConfig:
         num_threads (int): Number of threads (-1 for auto).
         seed (int): Random seed.
         random_seed (int): Let the config sample a random seed
-        device (str): Runtime device ("cpu" or "cuda").
-        storing_device ("cpu" or "cuda'): Device used for storing models/data. Store on the CPU if memory is a constraint
+        device (str): Runtime device ("cpu", "cuda", or "mps").
+        storing_device ("cpu", "cuda", or "mps'): Device used for storing models/data. Store on the CPU if memory is a constraint
             otherwise prefer the gpu
     """
 
@@ -170,8 +178,8 @@ class SystemConfig:
     seed: int = 1
     # Initialize with a random seed
     random_seed: bool = False
-    device: Literal["cpu", "cuda"] = "cuda"
-    storing_device: Literal["cpu", "cuda"] = "cuda"
+    device: Literal["cpu", "cuda", "mps"] = "cuda"
+    storing_device: Literal["cpu", "cuda", "mps"] = "cuda"
 
     def __post_init__(self):
         if self.random_seed:
@@ -218,6 +226,8 @@ class MainConfig:
     verbose: bool = False
     # Show a progress bar
     progress: bool = False
+    # Convenience CLI alias for env.render
+    render: bool = False
     # An optional config path
     config: Path | None = None
 
@@ -243,6 +253,7 @@ class MainConfig:
                 - 'training'
                 - 'system'
                 - 'logging'
+                - 'render' (optional alias for env.render)
                 - 'model' (required)
         Returns:
             MainConfig: A fully initialized configuration object.
@@ -254,6 +265,15 @@ class MainConfig:
         training_conf = config.pop("training", {})
         system_conf = config.pop("system", {})
         logging_conf = config.pop("logging", {})
+        render_conf = config.pop("render", False)
+
+        # Keep top-level --render as a convenience alias for env.render.
+        # In merged CLI configs, env.render may appear with a default False value
+        # even when it was not explicitly provided, so enable rendering if either
+        # alias is set.
+        env_render = bool(env_conf.get("render", False))
+        render_conf = bool(render_conf or env_render)
+        env_conf["render"] = render_conf
 
         env = EnvConfig(**env_conf) if env_conf else EnvConfig()
         training = (
@@ -284,6 +304,7 @@ class MainConfig:
             system=system,
             logging=logging,
             model=model,
+            render=render_conf,
             **config,
         )
 
@@ -328,11 +349,17 @@ class HarvestConfig:
             "reacher",
             "swimmer",
             "walker2d",
+            "car-racing",
+            "car_racing",
             "dmc-quadruped-run",
             "dmc-humanoid-run",
             "dmc-cheetah-run",
             "dmc-hopper-hop",
             "dmc-walker-run",
+            "dmc-cartpole-swingup",
+            "dmc-acrobot-swingup",
+            "cartpole-swingup-v0",
+            "acrobot-swingup-v0",
             "metaworld-window-close",
             "metaworld-window-open",
             "metaworld-drawer-close",

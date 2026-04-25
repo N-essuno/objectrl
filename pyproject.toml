@@ -24,7 +24,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    "gymnasium[mujoco]>=1.1.1",
+    "gymnasium[box2d,mujoco]>=1.1.1",
     "torch>=2.7.0",
     "torchrl>=0.8.1",
     "tqdm>=4.67.1",
@@ -36,7 +36,8 @@ dependencies = [
     "seaborn>=0.13.2",
     "pyqt6>=6.9.1",
     "dm-control>=1.0.31",
-    "metaworld>=3.0.0"
+    "metaworld>=3.0.0",
+    "pytest>=9.0.3",
 ]
 
 [project.optional-dependencies]

@@ -68,7 +68,7 @@ class ReplayBuffer:
         # Use LazyMemmap on CPU and LazyTensorStorage on GPU
         if device.type == "cpu":
             return LazyMemmapStorage(buffer_size, device=device)
-        elif device.type == "cuda":
+        elif device.type in {"cuda", "mps"}:
             return LazyTensorStorage(buffer_size, device=device)
         else:
             raise NotImplementedError(
@@ -90,11 +90,29 @@ class ReplayBuffer:
 
         self.data_size = 0
         self.pointer = 0
+        self.epoch_iterator = None
 
         storage = self._get_storage(self.buffer_size, self.storing_device)
 
         # Initialize TensorDictReplayBuffer with the storage
         self.memory = TensorDictReplayBuffer(storage=storage)
+
+    def close(self) -> None:
+        """Release replay-buffer resources when available."""
+        memory = getattr(self, "memory", None)
+        if memory is None:
+            return
+
+        close_memory = getattr(memory, "close", None)
+        if callable(close_memory):
+            close_memory()
+
+        storage = getattr(memory, "storage", None)
+        close_storage = getattr(storage, "close", None)
+        if callable(close_storage):
+            close_storage()
+
+        self.epoch_iterator = None
 
     def add(self, experience: TensorDict) -> None:
         """

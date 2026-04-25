@@ -16,8 +16,10 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 # -----------------------------------------------------------------------------------
 
-import pytest
 from pathlib import Path
+
+import pytest
+
 from objectrl.config.config import (
     NoiseConfig,
     EnvConfig,
@@ -51,6 +53,7 @@ def test_env_config_defaults_and_override():
     assert env.noisy is None
     assert env.position_delay is None
     assert env.control_cost_weight is None
+    assert env.render is False
 
     env2 = EnvConfig(
         name="hopper", noisy=None, position_delay=0.1, control_cost_weight=0.5
@@ -58,6 +61,9 @@ def test_env_config_defaults_and_override():
     assert env2.name == "hopper"
     assert env2.position_delay == 0.1
     assert env2.control_cost_weight == 0.5
+
+    env3 = EnvConfig(name="hopper", render=True)
+    assert env3.render is True
 
 
 def test_training_config_defaults_and_override():
@@ -96,6 +102,9 @@ def test_env_config_name_literals():
         "humanoid",
         "reacher",
         "swimmer",
+        "car-racing",
+        "dmc-cartpole-swingup",
+        "cartpole-swingup-v0",
         "custom_env",
     ]
     for name in valid_names:
@@ -104,7 +113,7 @@ def test_env_config_name_literals():
 
 
 def test_system_config_device_literals():
-    for device in ["cpu", "cuda"]:
+    for device in ["cpu", "cuda", "mps"]:
         sys_conf = SystemConfig(device=device)
         assert sys_conf.device == device
 
@@ -133,3 +142,23 @@ def test_main_config_from_config_invalid_model():
 def test_main_config_from_config_missing_model():
     with pytest.raises(AssertionError):
         MainConfig.from_config({})
+
+
+def test_main_config_from_config_render_alias_sets_env_render():
+    model_name = next(iter(model_configs))
+    config = MainConfig.from_config({"model": {"name": model_name}, "render": True})
+    assert config.render is True
+    assert config.env.render is True
+
+
+def test_main_config_from_config_env_render_overrides_alias():
+    model_name = next(iter(model_configs))
+    config = MainConfig.from_config(
+        {
+            "model": {"name": model_name},
+            "render": False,
+            "env": {"render": True},
+        }
+    )
+    assert config.render is True
+    assert config.env.render is True

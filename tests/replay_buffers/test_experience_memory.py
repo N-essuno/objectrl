@@ -258,4 +258,16 @@ def test_calculate_num_batches_and_get_steps_and_iterator(replay_buffer_patch):
     # n_epochs == 0 disables iterator and returns max_iter
     n_steps = buf.get_steps_and_iterator(n_epochs=0, max_iter=42, batch_size=10)
     assert n_steps == 42
+
+
+def test_close_calls_underlying_close_methods(replay_buffer_patch):
+    _, _, _, mock_replay_buffer = replay_buffer_patch
+
+    buf = ReplayBuffer(torch.device("cpu"), torch.device("cpu"), 10)
+    buf.memory = mock_replay_buffer
+
+    buf.close()
+
+    mock_replay_buffer.close.assert_called_once()
+    mock_replay_buffer.storage.close.assert_called_once()
     assert buf.epoch_iterator is None

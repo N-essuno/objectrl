@@ -16,6 +16,8 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 # -----------------------------------------------------------------------------------
 
+import warnings
+
 import gymnasium as gym
 import numpy as np
 import torch
@@ -40,12 +42,22 @@ gymnasium_mujoco_mappings = {
     "walker2d": "Walker2d-v5",
 }
 
+gymnasium_box2d_mappings = {
+    "car-racing": "CarRacing-v3",
+    "car_racing": "CarRacing-v3",
+    "CarRacing-v3": "CarRacing-v3",
+}
+
 dmc_mappings = {
     "dmc-quadruped-run": "dmc-quadruped-run",
     "dmc-humanoid-run": "dmc-humanoid-run",
     "dmc-cheetah-run": "dmc-cheetah-run",
     "dmc-hopper-hop": "dmc-hopper-hop",
     "dmc-walker-run": "dmc-walker-run",
+    "dmc-cartpole-swingup": "dmc-cartpole-swingup",
+    "dmc-acrobot-swingup": "dmc-acrobot-swingup",
+    "cartpole-swingup-v0": "dmc-cartpole-swingup",
+    "acrobot-swingup-v0": "dmc-acrobot-swingup",
 }
 
 metaworld_mappings = {
@@ -61,11 +73,22 @@ metaworld_mappings = {
 env_mappings = {
     # Gymnasium environments
     **gymnasium_mujoco_mappings,
+    **gymnasium_box2d_mappings,
     # DMC environments
     **dmc_mappings,
     # MetaWorld environments
     **metaworld_mappings,
 }
+
+
+def _flatten_if_needed(env: gym.Env) -> gym.Env:
+    """Flatten image- or tensor-shaped Box observations to 1D vectors."""
+    if (
+        isinstance(env.observation_space, gym.spaces.Box)
+        and len(env.observation_space.shape) > 1
+    ):
+        env = FlattenObservation(env)
+    return env
 
 
 def make_env(  # noqa: C901
@@ -109,9 +132,24 @@ def make_env(  # noqa: C901
 
     # ruff: noqa: C901
     def _make_single_env():
+        registry_keys = set(gym.envs.registry.keys())
         if env_name in gymnasium_mujoco_mappings.values():
-            if env_name in list(gym.envs.registry.keys()):
-                env = gym.make(env_name)
+            if env_name in registry_keys:
+                env = gym.make(
+                    env_name,
+                    render_mode="human" if getattr(env_config, "render", False) else None,
+                )
+            else:
+                raise gym.error.Error(
+                    f"Environment '{env_name}' is not registered in Gym."
+                )
+        elif env_name in gymnasium_box2d_mappings.values():
+            if env_name in registry_keys:
+                env = gym.make(
+                    env_name,
+                    continuous=True,
+                    render_mode="human" if getattr(env_config, "render", False) else None,
+                )
             else:
                 raise gym.error.Error(
                     f"Environment '{env_name}' is not registered in Gym."
@@ -126,13 +164,30 @@ def make_env(  # noqa: C901
             env = DMCEnv(
                 domain_name=domain, task_name=task, task_kwargs={"random": seed}
             )
+            if getattr(env_config, "render", False):
+                warnings.warn(
+                    "Live rendering is not supported for DMCEnv in this codepath; continuing without a render window.",
+                    stacklevel=2,
+                )
             env = FlattenObservation(env)
         elif env_name in metaworld_mappings.values():
-            env = gym.make("Meta-World/MT1", env_name=env_name, seed=seed)
+            env = gym.make(
+                "Meta-World/MT1",
+                env_name=env_name,
+                seed=seed,
+                render_mode="human" if getattr(env_config, "render", False) else None,
+            )
             if env_config.sparse_rewards:
                 env = SparsifyRewardWrapper(env)
+        elif env_name in registry_keys:
+            env = gym.make(
+                env_name,
+                render_mode="human" if getattr(env_config, "render", False) else None,
+            )
         else:
             raise gym.error.Error(f"Environment '{env_name}' not found.")
+
+        env = _flatten_if_needed(env)
 
         if not isinstance(env.action_space, gym.spaces.Discrete):
             env = RescaleAction(env, np.float32(-1.0), np.float32(1.0))
@@ -152,6 +207,8 @@ def make_env(  # noqa: C901
         return env
 
     def _make_wrappers(env, env_config):
+        env = _flatten_if_needed(env)
+
         if not isinstance(env.action_space, gym.spaces.Discrete):
             env = RescaleAction(env, np.float32(-1.0), np.float32(1.0))
 

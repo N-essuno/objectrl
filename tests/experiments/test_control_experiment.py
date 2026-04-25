@@ -38,9 +38,11 @@ def mock_config():
     config.training.eval_episodes = 2
     config.training.max_iter = 1
     config.training.n_epochs = 1
+    config.training.parallelize_eval = False
     config.training.reset_frequency = 4
     config.logging.save_frequency = 5
     config.progress = False
+    config.verbose = False
     return config
 
 
@@ -114,7 +116,7 @@ class DummyAgent:
 )
 @patch(
     "objectrl.experiments.base_experiment.make_env",
-    side_effect=lambda env_name, seed, env_config, eval_env=False: make_dummy_env(),
+    side_effect=lambda *args, **kwargs: make_dummy_env(),
 )
 @patch(
     "objectrl.experiments.control_experiment.totorch",
@@ -149,3 +151,42 @@ def test_control_experiment_train(
     assert exp.agent.learn.call_count >= 1
     assert exp.agent.logger.save_eval_results.call_count >= 1
     assert exp.agent.logger.log.call_count >= 1
+
+
+@patch(
+    "objectrl.experiments.base_experiment.get_model",
+    return_value=DummyAgent(MagicMock()),
+)
+@patch(
+    "objectrl.experiments.base_experiment.make_env",
+    side_effect=lambda *args, **kwargs: make_dummy_env(),
+)
+@patch(
+    "objectrl.experiments.control_experiment.totorch",
+    side_effect=lambda x, device=None: torch.tensor(x, dtype=torch.float32),
+)
+@patch(
+    "objectrl.experiments.control_experiment.tonumpy", side_effect=lambda x: x.numpy()
+)
+@patch(
+    "objectrl.experiments.control_experiment.tqdm",
+    side_effect=lambda iterable, **kwargs: iterable,
+)
+def test_control_experiment_verbose_enables_progress_bar(
+    mock_tqdm,
+    mock_tonumpy,
+    mock_totorch,
+    mock_make_env,
+    mock_get_model,
+    mock_config,
+):
+    mock_config.verbose = True
+    mock_config.progress = False
+    mock_config.training.max_steps = 2
+    mock_config.training.warmup_steps = 1
+
+    exp = ControlExperiment(mock_config)
+    exp.train()
+
+    assert mock_tqdm.called
+    assert mock_tqdm.call_args.kwargs["disable"] is False

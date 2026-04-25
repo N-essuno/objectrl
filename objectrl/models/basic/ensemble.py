@@ -47,7 +47,7 @@ class Ensemble[T: nn.Module](nn.Module, ABC):
         self,
         n_members: int,
         models: list[T],
-        device: Literal["cpu", "cuda"] = "cpu",
+        device: Literal["cpu", "cuda", "mps"] = "cpu",
         sequential: bool = False,
         compile: bool = False,
     ) -> None:

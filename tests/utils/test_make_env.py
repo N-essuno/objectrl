@@ -16,10 +16,11 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 # -----------------------------------------------------------------------------------
 
-import pytest
+from unittest.mock import MagicMock, patch
+
 import gymnasium as gym
 import numpy as np
-from unittest.mock import MagicMock, patch
+import pytest
 
 from objectrl.utils.make_env import make_env
 
@@ -81,3 +82,62 @@ def test_make_env_basic(mock_make, mock_registry, env_config):
     assert env is not None
     assert dummy_env.reset_called_with_seed == 123
     assert isinstance(env, gym.Env)
+
+
+@patch("gymnasium.envs.registry")
+@patch("gymnasium.make")
+def test_make_env_car_racing_continuous(mock_make, mock_registry, env_config):
+    mock_registry.keys.return_value = ["CarRacing-v3"]
+
+    dummy_env = DummyEnv(
+        gym.spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
+    )
+    mock_make.return_value = dummy_env
+
+    env = make_env("car-racing", seed=7, env_config=env_config)
+
+    assert env is not None
+    assert dummy_env.reset_called_with_seed == 7
+    mock_make.assert_called_with("CarRacing-v3", continuous=True, render_mode=None)
+
+
+@patch("objectrl.utils.make_env.FlattenObservation", side_effect=lambda env: env)
+@patch("objectrl.utils.make_env.DMCEnv")
+def test_make_env_dmc_swingup_alias(mock_dmc_env, mock_flatten, env_config):
+    dummy_env = DummyEnv(
+        gym.spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
+    )
+    mock_dmc_env.return_value = dummy_env
+
+    env = make_env("cartpole-swingup-v0", seed=11, env_config=env_config)
+
+    assert env is not None
+    assert dummy_env.reset_called_with_seed == 11
+    mock_dmc_env.assert_called_with(
+        domain_name="cartpole",
+        task_name="swingup",
+        task_kwargs={"random": 11},
+    )
+    mock_flatten.assert_called_once()
+
+
+@patch("objectrl.utils.make_env.FlattenObservation", side_effect=lambda env: env)
+@patch("gymnasium.envs.registry")
+@patch("gymnasium.make")
+def test_make_env_flattens_multidim_box_observation(
+    mock_make, mock_registry, mock_flatten, env_config
+):
+    mock_registry.keys.return_value = ["CarRacing-v3"]
+
+    dummy_env = DummyEnv(
+        gym.spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
+    )
+    dummy_env.observation_space = gym.spaces.Box(
+        low=0, high=255, shape=(96, 96, 3), dtype=np.uint8
+    )
+    mock_make.return_value = dummy_env
+
+    env = make_env("car-racing", seed=5, env_config=env_config)
+
+    assert env is not None
+    mock_flatten.assert_called_once_with(dummy_env)

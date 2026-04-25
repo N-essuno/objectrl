@@ -82,7 +82,7 @@ class ControlExperiment(Experiment):
         for step in tqdm(
             range(self.max_steps),
             leave=True,
-            disable=not self.config.progress,
+            disable=not (self.config.progress or self.verbose),
         ):
             e_step += 1
 
@@ -111,6 +111,8 @@ class ControlExperiment(Experiment):
             next_state, reward, terminated, truncated, info = self.env.step(
                 int(action) if self._discrete_action_space else tonumpy(action)
             )
+            if getattr(self.config.env, "render", False):
+                self.env.render()
             next_state = totorch(next_state, device=self.device)
 
             transition_kwargs = {
@@ -243,6 +245,8 @@ class ControlExperiment(Experiment):
                     next_state, reward, term, trunc, info = self.eval_env.step(
                         int(action) if self._discrete_action_space else tonumpy(action)
                     )
+                    if getattr(self.config.env, "render", False):
+                        self.eval_env.render()
 
                     # Check termination condition
                     done = term or trunc
