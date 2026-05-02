@@ -46,7 +46,6 @@ htmlcov/
 nosetests.xml
 coverage.xml
 *.cover
-*.py,cover
 .hypothesis/
 .pytest_cache/
 cover/
@@ -179,8 +178,8 @@ cython_debug/
 .pypirc
 
 # Ignore log files, result files, and scripts
-*_logs*
 *_results*
 *.log
 /scripts/
 .DS_Store
+plots/
