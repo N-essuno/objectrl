@@ -183,3 +183,4 @@ cython_debug/
 *_results*
 *.log
 /scripts/
+.DS_Store
