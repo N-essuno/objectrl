@@ -146,7 +146,7 @@ def main() -> None:
         )
 
     ax.set_title(f"Eval rewards vs steps averaged for {n_seeds} seeds ({args.env})")
-    ax.set_xlabel("Eval step")
+    ax.set_xlabel("Step")
     ax.set_ylabel("Eval reward")
     x_formatter = ticker.ScalarFormatter(useOffset=False)
     x_formatter.set_scientific(False)
