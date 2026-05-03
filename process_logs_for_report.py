@@ -27,8 +27,8 @@ from matplotlib import ticker
 
 .venv/bin/python process_logs_for_report.py \
     --env acrobot-swingup-v0 \
-    --algos sac ppo \
-    --output plots/report_acrobot_temp.png \
+    --algos sac td3 ppo \
+    --output plots/report_acrobot.png \
     --logs-root ../_logs \
     --seeds 01 22 42 1234 3407 \
     --plot-every-steps 30000
