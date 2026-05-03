@@ -20,18 +20,18 @@ from matplotlib import ticker
 .venv/bin/python process_logs_for_report.py \
     --env cartpole-swingup-v0 \
     --algos sac td3 ppo \
-    --output plots/report_cartpole_swingup_temp.png \
+    --output plots/report_cartpole_temp.png \
     --logs-root ../_logs \
     --seeds 01 22 42 1234 3407 \
     --plot-every-steps 20000
 
 .venv/bin/python process_logs_for_report.py \
     --env acrobot-swingup-v0 \
-    --algos sac \
-    --output plots/report_acrobot_swingup_temp.png \
+    --algos sac ppo \
+    --output plots/report_acrobot_temp.png \
     --logs-root ../_logs \
     --seeds 01 22 42 1234 3407 \
-    --plot-every-steps 20000
+    --plot-every-steps 30000
 
 .venv/bin/python process_logs_for_report.py \
     --env car-racing \
