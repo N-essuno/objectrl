@@ -20,8 +20,26 @@ from matplotlib import ticker
 .venv/bin/python process_logs_for_report.py \
     --env cartpole-swingup-v0 \
     --algos sac td3 ppo \
-    --output plots/report_cartpole.png \
-    --logs-root ../_logs
+    --output plots/report_cartpole_swingup_temp.png \
+    --logs-root ../_logs \
+    --seeds 01 22 42 1234 3407 \
+    --plot-every-steps 20000
+
+.venv/bin/python process_logs_for_report.py \
+    --env acrobot-swingup-v0 \
+    --algos sac \
+    --output plots/report_acrobot_swingup_temp.png \
+    --logs-root ../_logs \
+    --seeds 01 22 42 1234 3407 \
+    --plot-every-steps 20000
+
+.venv/bin/python process_logs_for_report.py \
+    --env car-racing \
+    --algos sac ppo \
+    --output plots/report_car_racing_temp.png \
+    --logs-root ../_logs \
+    --seeds 01 22 42 1234 3407 \
+    --plot-every-steps 20000
 """
 
 
@@ -57,14 +75,27 @@ def _load_seed_step_means(eval_file: Path) -> dict[int, float]:
     return out
 
 
-def _aggregate_algorithm(env: str, algo: str, logs_root: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
+def _aggregate_algorithm(
+    env: str,
+    algo: str,
+    logs_root: Path,
+    seeds: set[str] | None,
+    plot_every_steps: int | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
     algo_dir = logs_root / env / algo
     if not algo_dir.is_dir():
         raise FileNotFoundError(f"Algorithm log directory not found: {algo_dir}")
 
     per_seed_step_means: list[dict[int, float]] = []
 
-    for seed_dir in sorted(algo_dir.glob("seed_*")):
+    if seeds is None:
+        seed_dirs = sorted(algo_dir.glob("seed_*"))
+    else:
+        seed_dirs = [algo_dir / f"seed_{seed}" for seed in sorted(seeds)]
+
+    for seed_dir in seed_dirs:
+        if not seed_dir.is_dir():
+            continue
         eval_file = _latest_eval_file(seed_dir)
         if eval_file is None:
             continue
@@ -74,6 +105,8 @@ def _aggregate_algorithm(env: str, algo: str, logs_root: Path) -> tuple[np.ndarr
         raise FileNotFoundError(f"No eval_results.npy found under: {algo_dir}")
 
     all_steps = sorted({step for data in per_seed_step_means for step in data})
+    if plot_every_steps is not None:
+        all_steps = [step for step in all_steps if step % plot_every_steps == 0]
 
     steps = []
     means = []
@@ -105,6 +138,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--env", required=True, help="Environment name (folder under _logs).")
     parser.add_argument("--algos", nargs="+", required=True, help="One or more algorithm names.")
+    parser.add_argument(
+        "--seeds",
+        nargs="+",
+        default=None,
+        help="Optional seed names to include (example: --seeds 01 22 42).",
+    )
+    parser.add_argument(
+        "--plot-every-steps",
+        type=int,
+        default=None,
+        help="Only plot/evaluate points where step %% N == 0 (example: 20000).",
+    )
     parser.add_argument("--logs-root", default="_logs", help="Root logs directory.")
     parser.add_argument(
         "--output",
@@ -118,11 +163,20 @@ def main() -> None:
     args = parse_args()
     logs_root = Path(args.logs_root)
     output_path = Path(args.output) if args.output else Path(f"report_{args.env}.png")
+    seeds = set(args.seeds) if args.seeds is not None else None
+    if args.plot_every_steps is not None and args.plot_every_steps <= 0:
+        raise ValueError("--plot-every-steps must be a positive integer.")
 
     fig, ax = plt.subplots(figsize=(10, 6), dpi=120)
 
     for algo in args.algos:
-        steps, means, stds, counts, n_seeds = _aggregate_algorithm(args.env, algo, logs_root)
+        steps, means, stds, counts, n_seeds = _aggregate_algorithm(
+            args.env,
+            algo,
+            logs_root,
+            seeds,
+            args.plot_every_steps,
+        )
 
         print(f"\nAlgorithm: {algo} | environment: {args.env} | seeds used: {n_seeds}")
         for s, m, st, c in zip(steps, means, stds, counts):
@@ -133,7 +187,9 @@ def main() -> None:
                 f"n_seeds={int(c):d}"
             )
         overall_mean_across_steps = np.mean(means) if means.size > 0 else float("nan")
+        overall_std_across_steps = np.std(means, ddof=0) if means.size > 1 else float("nan")
         print(f"Overall mean at across steps: {overall_mean_across_steps:.6f}")
+        print(f"Overall std at across steps: {overall_std_across_steps:.6f}")
 
         ax.errorbar(
             steps,
@@ -150,7 +206,7 @@ def main() -> None:
     ax.set_ylabel("Eval reward")
     x_formatter = ticker.ScalarFormatter(useOffset=False)
     x_formatter.set_scientific(False)
-    ax.xaxis.set_major_locator(ticker.MultipleLocator(100000))  # tick every 100k
+    ax.xaxis.set_major_locator(ticker.MultipleLocator(300000))  # tick every 100k
     ax.xaxis.set_major_formatter(x_formatter)
     ax.grid(alpha=0.3)
     ax.legend()
