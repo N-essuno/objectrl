@@ -54,6 +54,7 @@ def test_env_config_defaults_and_override():
     assert env.position_delay is None
     assert env.control_cost_weight is None
     assert env.render is False
+    assert env.use_cnn is False
 
     env2 = EnvConfig(
         name="hopper", noisy=None, position_delay=0.1, control_cost_weight=0.5
@@ -64,6 +65,9 @@ def test_env_config_defaults_and_override():
 
     env3 = EnvConfig(name="hopper", render=True)
     assert env3.render is True
+
+    env4 = EnvConfig(name="car-racing", use_cnn=True)
+    assert env4.use_cnn is True
 
 
 def test_training_config_defaults_and_override():

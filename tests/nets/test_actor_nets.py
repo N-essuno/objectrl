@@ -99,3 +99,19 @@ def test_actor_net_custom_params():
     out = model(x)
     assert "action" in out
     assert out["action"].shape == (4, 2, 2)
+
+
+def test_actor_net_probabilistic_image_observation():
+    model = ActorNetProbabilistic(dim_state=(96, 96, 3), dim_act=3)
+    x = torch.randint(0, 256, (2, 96, 96, 3), dtype=torch.uint8)
+    out = model(x)
+    assert "action" in out
+    assert out["action"].shape == (2, 3)
+
+
+def test_actor_net_image_observation_single_state():
+    model = ActorNet(dim_state=(96, 96, 3), dim_act=3)
+    x = torch.randint(0, 256, (96, 96, 3), dtype=torch.uint8)
+    out = model(x)
+    assert "action" in out
+    assert out["action"].shape == (3,)

@@ -98,3 +98,26 @@ def test_dqn_net_forward(batch_size):
     out = model(x)
     assert out.shape == (batch_size, dim_act)
     assert torch.is_tensor(out)
+
+
+def test_critic_net_forward_image_input_tuple():
+    model = CriticNet(dim_state=(96, 96, 3), dim_act=3)
+    state = torch.randint(0, 256, (2, 96, 96, 3), dtype=torch.uint8)
+    action = torch.randn(2, 3)
+    out = model((state, action))
+    assert out.shape == (2, 1)
+
+
+def test_critic_net_probabilistic_forward_image_input_tuple():
+    model = CriticNetProbabilistic(dim_state=(96, 96, 3), dim_act=3)
+    state = torch.randint(0, 256, (2, 96, 96, 3), dtype=torch.uint8)
+    action = torch.randn(2, 3)
+    out = model((state, action))
+    assert out.shape == (2, 2)
+
+
+def test_dqn_net_forward_image_state():
+    model = DQNNet(dim_state=(96, 96, 3), dim_act=5)
+    state = torch.randint(0, 256, (3, 96, 96, 3), dtype=torch.uint8)
+    out = model(state)
+    assert out.shape == (3, 5)

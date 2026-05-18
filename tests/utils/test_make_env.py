@@ -63,6 +63,9 @@ def env_config():
         noisy = NoisyConfig()
         position_delay = 0
         control_cost_weight = 0.0
+        use_cnn = False
+        render = False
+        sparse_rewards = False
 
     return Config()
 
@@ -141,3 +144,26 @@ def test_make_env_flattens_multidim_box_observation(
 
     assert env is not None
     mock_flatten.assert_called_once_with(dummy_env)
+
+
+@patch("objectrl.utils.make_env.FlattenObservation", side_effect=lambda env: env)
+@patch("gymnasium.envs.registry")
+@patch("gymnasium.make")
+def test_make_env_keeps_image_observation_when_use_cnn(
+    mock_make, mock_registry, mock_flatten, env_config
+):
+    mock_registry.keys.return_value = ["CarRacing-v3"]
+
+    dummy_env = DummyEnv(
+        gym.spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
+    )
+    dummy_env.observation_space = gym.spaces.Box(
+        low=0, high=255, shape=(96, 96, 3), dtype=np.uint8
+    )
+    mock_make.return_value = dummy_env
+
+    env_config.use_cnn = True
+    env = make_env("car-racing", seed=5, env_config=env_config)
+
+    assert env is not None
+    mock_flatten.assert_not_called()
