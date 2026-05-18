@@ -82,6 +82,11 @@ class EnvConfig:
         control_cost_weight (float | ): Optional weight for control cost penalty.
         sparse_rewards (bool): Whether to use sparse rewards.
         render (bool): Whether to render environment frames during train/eval.
+        use_cnn (bool): Keep image observations unflattened so CNN-based policies can be used.
+        encoder_type (str): "light" (Nature-DQN 3-conv) or "vgg" (VGG-style 4-block).
+        use_frame_stack (bool): Stack the last n_frames for temporal context (CRITICAL for CarRacing).
+        n_frames (int): Number of frames to stack (default: 4).
+        normalize_obs (bool): Normalize observations using running mean/std (CRITICAL for stability).
     """
 
     name: (
@@ -120,6 +125,11 @@ class EnvConfig:
     control_cost_weight: float | None = None
     sparse_rewards: bool = False
     render: bool = False
+    use_cnn: bool = False
+    encoder_type: str = "light"  # "light" (Nature-DQN 3-conv) or "vgg" (VGG-style 4-block)
+    use_frame_stack: bool = False  # CRITICAL: Frame stacking for temporal context
+    n_frames: int = 4  # Number of frames to stack
+    normalize_obs: bool = False  # CRITICAL: Observation normalization for stability
 
 
 # [end-env-config]
@@ -172,6 +182,8 @@ class SystemConfig:
         device (str): Runtime device ("cpu", "cuda", or "mps").
         storing_device ("cpu", "cuda", or "mps'): Device used for storing models/data. Store on the CPU if memory is a constraint
             otherwise prefer the gpu
+        deterministic (bool): Enforce fully deterministic CUDA ops. Disables cuDNN
+            benchmark and non-deterministic kernels. Slower but reproducible.
     """
 
     num_threads: int = -1
@@ -180,6 +192,7 @@ class SystemConfig:
     random_seed: bool = False
     device: Literal["cpu", "cuda", "mps"] = "cuda"
     storing_device: Literal["cpu", "cuda", "mps"] = "cuda"
+    deterministic: bool = False
 
     def __post_init__(self):
         if self.random_seed:

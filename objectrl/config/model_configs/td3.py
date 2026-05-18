@@ -35,9 +35,9 @@ class ActorNoiseConfig:
         target_policy_noise_clip (float): Clipping range for target policy noise.
     """
 
-    policy_noise: float = 0.1
-    target_policy_noise: float = 0.2
-    target_policy_noise_clip: float = 0.5
+    policy_noise: float = 0.05  # Reduced from 0.1 for more stable exploration
+    target_policy_noise: float = 0.1  # Reduced from 0.2
+    target_policy_noise_clip: float = 0.3  # Reduced from 0.5
 
 
 @dataclass
@@ -88,8 +88,8 @@ class TD3Config:
     name: str = "td3"
     noise: ActorNoiseConfig = field(default_factory=ActorNoiseConfig)
     loss: str = "MSELoss"
-    policy_delay: int = 2
-    tau: float = 0.005
+    policy_delay: int = 1  # Reduced from 2 for faster actor updates
+    tau: float = 0.01  # Increased from 0.005 for faster convergence
 
     actor: TD3ActorConfig = field(default_factory=TD3ActorConfig)
     critic: TD3CriticConfig = field(default_factory=TD3CriticConfig)

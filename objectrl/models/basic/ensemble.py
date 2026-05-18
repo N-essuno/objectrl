@@ -77,7 +77,12 @@ class Ensemble[T: nn.Module](nn.Module, ABC):
             )
             self.sequential = True
 
-        if sequential:
+        if not self.sequential and any(
+            isinstance(m, nn.Conv2d) for m in models[0].modules()
+        ):
+            self.sequential = True
+
+        if self.sequential:
             self.models = nn.ModuleList(models)
             self.forward_model = lambda input: torch.stack(
                 [net(input) for net in self.models]

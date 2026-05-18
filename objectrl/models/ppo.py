@@ -26,7 +26,7 @@ from torch import nn as nn
 from objectrl.models.basic.ac import ActorCritic
 from objectrl.models.basic.actor import Actor
 from objectrl.models.basic.critic import CriticEnsemble
-from objectrl.utils.net_utils import MLP
+from objectrl.utils.net_utils import MLP, make_pixel_encoder
 
 if typing.TYPE_CHECKING:
     from objectrl.config.config import MainConfig
@@ -37,7 +37,7 @@ class PPOActorNetProbabilistic(nn.Module):
     Probabilistic actor network for PPO using a Gaussian policy.
 
     Args:
-        dim_state (int): Dimension of input state.
+        dim_state (int | tuple[int,int,int]): Dimension of input state, or HWC image shape.
         dim_act (int): Dimension of action space.
         n_heads (int): Number of heads (only supports 1).
         depth (int): Depth of the MLP.
@@ -45,11 +45,12 @@ class PPOActorNetProbabilistic(nn.Module):
         act (Literal["crelu", "relu"]): Activation function.
         has_norm (bool): Whether to include normalization layers.
         upper_clamp (float): Maximum clamp value for log standard deviation.
+        encoder_type (str): Pixel encoder variant when dim_state is a tuple: "light" or "vgg".
     """
 
     def __init__(
         self,
-        dim_state: int,
+        dim_state: int | tuple[int, int, int],
         dim_act: int,
         n_heads: int = 1,
         depth: int = 3,
@@ -57,6 +58,7 @@ class PPOActorNetProbabilistic(nn.Module):
         act: Literal["crelu", "relu"] = "relu",
         has_norm: bool = False,
         upper_clamp: float = -1.0,
+        encoder_type: str = "light",
     ) -> None:
         super().__init__()
         assert n_heads == 1, "PPOActorNetProbabilistic only supports n_heads=1"
@@ -64,8 +66,14 @@ class PPOActorNetProbabilistic(nn.Module):
         self.n_heads = n_heads
         self.upper_clamp = upper_clamp
 
+        self.encoder = None
+        input_dim = dim_state
+        if isinstance(dim_state, tuple):
+            self.encoder = make_pixel_encoder(dim_state, feature_dim=width, encoder_type=encoder_type)
+            input_dim = self.encoder.output_dim
+
         # Create the network architecture
-        self.arch = MLP(dim_state, dim_act, depth, width, act, has_norm)
+        self.arch = MLP(input_dim, dim_act, depth, width, act, has_norm)
         self.action_logstd = nn.Parameter(torch.zeros(dim_act))
 
     def forward(self, x: torch.Tensor, is_training: bool = True) -> dict:
@@ -79,7 +87,7 @@ class PPOActorNetProbabilistic(nn.Module):
         Returns:
             dict: Dictionary containing action distribution, action, and log-prob.
         """
-        action_mean = self.arch(x)
+        action_mean = self.arch(x if self.encoder is None else self.encoder(x))
         action_logstd = self.action_logstd.clamp(max=self.upper_clamp).expand_as(
             action_mean
         )

@@ -36,20 +36,29 @@ from objectrl.config.utils import (
 from objectrl.experiments.control_experiment import ControlExperiment
 
 
-def set_reproducibility(seed: int) -> None:
+def set_reproducibility(seed: int, deterministic: bool = False) -> None:
     """
     Configure PyTorch and CUDA for reproducible experiments.
 
-    This function sets all relevant random seeds and enables deterministic
-    execution so that training runs can be reproduced as closely as possible.
+    This function sets all relevant random seeds. When deterministic=True it
+    also enforces fully deterministic CUDA ops (slower but bit-reproducible).
+    When deterministic=False, cuDNN benchmark mode is enabled for faster
+    CNN kernels at the cost of run-to-run numerical variation.
 
     Args:
         seed (int): The base random seed to apply across CPU and GPU RNGs.
+        deterministic (bool): Enforce deterministic algorithms.
     """
-    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
-    torch.use_deterministic_algorithms(True)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+    if deterministic:
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+        torch.use_deterministic_algorithms(True)
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
+    else:
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.deterministic = False
 
 
 def main(config: MainConfig) -> None:
@@ -63,7 +72,10 @@ def main(config: MainConfig) -> None:
     This function prints the config if verbose, creates a ControlExperiment
     instance, and starts training.
     """
-    set_reproducibility(config.system.seed)
+    set_reproducibility(config.system.seed, deterministic=config.system.deterministic)
+
+    if config.system.num_threads > 0:
+        torch.set_num_threads(config.system.num_threads)
 
     if config.verbose:
         pprint.pprint(config)

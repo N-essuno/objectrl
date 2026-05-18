@@ -73,10 +73,18 @@ class Agent(nn.Module, ABC):
         assert isinstance(
             self.config_env.env.observation_space, gym.spaces.Box
         ), "The library requires continuous state spaces"
-        assert (
-            len(self.config_env.env.observation_space.shape) == 1
-        ), f"Observation space must be an integer, got {self.config_env.env.observation_space.shape}"
-        self.dim_state = self.config_env.env.observation_space.shape[0]
+        obs_shape = self.config_env.env.observation_space.shape
+        use_cnn = bool(getattr(self.config_env, "use_cnn", False))
+
+        if len(obs_shape) == 1:
+            self.dim_state = obs_shape[0]
+        elif len(obs_shape) == 3 and use_cnn:
+            self.dim_state = obs_shape
+        else:
+            raise AssertionError(
+                "Observation space must be 1D unless env.use_cnn is enabled for image observations. "
+                f"Got shape {obs_shape}"
+            )
 
         # Get the action space dimensionality
         if isinstance(self.config_env.env.action_space, gym.spaces.Box):

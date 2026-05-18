@@ -71,9 +71,9 @@ class SACConfig:
     name: str = "sac"
     loss: str = "MSELoss"
     policy_delay: int = 1
-    tau: float = 0.005
-    target_entropy: float | None = None
-    alpha: float = 1.0
+    tau: float = 0.01  # Increased from 0.005 for faster convergence
+    target_entropy: float | None = None  # Set to "auto" or leave None for manual alpha
+    alpha: float = 0.1  # Reduced from 1.0 for more stable exploration
 
     actor: SACActorConfig = field(default_factory=SACActorConfig)
     critic: SACCriticConfig = field(default_factory=SACCriticConfig)

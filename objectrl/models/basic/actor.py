@@ -93,6 +93,7 @@ class Actor(nn.Module, ABC):
             act=self.config.model.actor.activation,
             has_norm=self.config.model.actor.norm,
             n_heads=self.config.model.actor.n_heads,
+            encoder_type=getattr(self.config.env, "encoder_type", "light"),
         ).to(self.device)
 
         self.optim = create_optimizer(self.config.training)(self.model.parameters())
@@ -107,6 +108,7 @@ class Actor(nn.Module, ABC):
                 act=self.config.model.actor.activation,
                 has_norm=self.config.model.actor.norm,
                 n_heads=self.config.model.actor.n_heads,
+                encoder_type=getattr(self.config.env, "encoder_type", "light"),
             ).to(self.device)
             self.init_target()
 

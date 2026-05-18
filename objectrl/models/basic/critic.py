@@ -74,6 +74,7 @@ class Critic(nn.Module):
             width=critic.width,
             act=critic.activation,
             has_norm=critic.norm,
+            encoder_type=getattr(config.env, "encoder_type", "light"),
         ).to(self.device)
 
         if self.has_target:
@@ -84,6 +85,7 @@ class Critic(nn.Module):
                 width=critic.width,
                 act=critic.activation,
                 has_norm=critic.norm,
+                encoder_type=getattr(config.env, "encoder_type", "light"),
             ).to(self.device)
             self.init_target()
 
@@ -113,7 +115,9 @@ class Critic(nn.Module):
         return self.model(self._prepare_input(state, action))
 
     @staticmethod
-    def _prepare_input(state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+    def _prepare_input(
+        state: torch.Tensor, action: torch.Tensor | None
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """
         Concatenate state and action tensors for critic input.
 
@@ -123,8 +127,15 @@ class Critic(nn.Module):
         Returns:
             torch.Tensor: Prepared input tensor for the critic.
         """
+        if action is None:
+            return state
+
         if action.shape == ():
             action = action.view(1, 1)
+
+        if state.ndim > 2:
+            return state, action
+
         return torch.cat((state, action), -1)
 
     def init_target(self) -> None:
@@ -346,6 +357,8 @@ class CriticEnsemble(nn.Module, ABC):
         """
         if action is None:
             sa = state
+        elif state.ndim > 2:
+            sa = (state, action)
         else:
             sa = torch.cat((state, action), -1)
 
@@ -367,6 +380,8 @@ class CriticEnsemble(nn.Module, ABC):
         assert self.has_target, "There is no target network to evaluate"
         if action is None:
             sa = state
+        elif state.ndim > 2:
+            sa = (state, action)
         else:
             sa = torch.cat((state, action), -1)
         return self.target_ensemble(sa)

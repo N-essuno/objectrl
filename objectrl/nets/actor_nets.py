@@ -22,13 +22,13 @@ import torch
 from torch import nn as nn
 
 from objectrl.nets.layers.heads import SquashedGaussianHead
-from objectrl.utils.net_utils import MLP
+from objectrl.utils.net_utils import MLP, PixelEncoder, make_pixel_encoder
 
 
 class ActorNetProbabilistic(nn.Module):
     def __init__(
         self,
-        dim_state: int,
+        dim_state: int | tuple[int, int, int],
         dim_act: int,
         n_heads: int = 1,
         depth: int = 3,
@@ -36,6 +36,7 @@ class ActorNetProbabilistic(nn.Module):
         act: Literal["relu", "crelu"] = "relu",
         has_norm: bool = False,
         upper_clamp: float = -2.0,
+        encoder_type: str = "light",
     ) -> None:
         """
         Probabilistic Actor Network that outputs a Gaussian distribution
@@ -50,13 +51,22 @@ class ActorNetProbabilistic(nn.Module):
         act (str): Activation function to use.
         has_norm (bool): Whether to include normalization layers.
         upper_clamp (float): Upper clamp value for log-variance in Squashed Gaussian.
+        encoder_type (str): Pixel encoder variant: "light" (Nature-DQN) or "vgg".
         """
         super().__init__()
         self.dim_act = dim_act
         self.n_heads = n_heads
+        self.encoder: PixelEncoder | None = None
+
+        input_dim = dim_state
+        if isinstance(dim_state, tuple):
+            self.encoder = make_pixel_encoder(dim_state, feature_dim=width, encoder_type=encoder_type)
+            input_dim = self.encoder.output_dim
 
         # Create the network architecture
-        self.arch = MLP(dim_state, 2 * dim_act * n_heads, depth, width, act, has_norm)
+        self.arch = MLP(
+            input_dim, 2 * dim_act * n_heads, depth, width, act, has_norm
+        )
 
         # Gaussian distribution head for action selection
         self.head = SquashedGaussianHead(self.dim_act, upper_clamp)
@@ -69,6 +79,8 @@ class ActorNetProbabilistic(nn.Module):
             x (Tensor): Input observation tensor.
             is_training (bool): Whether to sample actions stochastically.
         """
+        if self.encoder is not None:
+            x = self.encoder(x)
         f = self.arch(x)
         if self.n_heads > 1:
             f = f.view(-1, self.n_heads, 2 * self.dim_act)
@@ -78,13 +90,14 @@ class ActorNetProbabilistic(nn.Module):
 class ActorNet(nn.Module):
     def __init__(
         self,
-        dim_state: int,
+        dim_state: int | tuple[int, int, int],
         dim_act: int,
         n_heads: int = 1,
         depth: int = 3,
         width: int = 256,
         act: Literal["crelu", "relu"] = "relu",
         has_norm: bool = False,
+        encoder_type: str = "light",
     ) -> None:
         """
         Deterministic Actor Network that outputs continuous actions.
@@ -97,14 +110,21 @@ class ActorNet(nn.Module):
         width (int): Width of each hidden layer.
         act (str): Activation function name.
         has_norm (bool): Whether to use normalization layers.
+        encoder_type (str): Pixel encoder variant: "light" (Nature-DQN) or "vgg".
         """
         super().__init__()
 
         self.dim_act = dim_act
         self.n_heads = n_heads
+        self.encoder: PixelEncoder | None = None
+
+        input_dim = dim_state
+        if isinstance(dim_state, tuple):
+            self.encoder = make_pixel_encoder(dim_state, feature_dim=width, encoder_type=encoder_type)
+            input_dim = self.encoder.output_dim
 
         self.arch = nn.Sequential(
-            MLP(dim_state, dim_act * n_heads, depth, width, act, has_norm),
+            MLP(input_dim, dim_act * n_heads, depth, width, act, has_norm),
             nn.Tanh(),
         )
 
@@ -118,6 +138,8 @@ class ActorNet(nn.Module):
             x (Tensor): Input observation tensor.
             is_training (Optional[bool]): Unused; included for interface compatibility.
         """
+        if self.encoder is not None:
+            x = self.encoder(x)
         out = self.arch(x)
         if self.n_heads > 1:
             out = out.view(-1, self.n_heads, self.dim_act)

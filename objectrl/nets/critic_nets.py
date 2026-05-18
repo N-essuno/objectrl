@@ -22,7 +22,23 @@ import numpy as np
 import torch
 from torch import nn as nn
 
-from objectrl.utils.net_utils import MLP, BayesianMLP, FeatureExtractor
+from objectrl.utils.net_utils import MLP, BayesianMLP, FeatureExtractor, PixelEncoder, make_pixel_encoder
+
+
+def _prepare_state_action_input(
+    x: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+    encoder: PixelEncoder | None,
+) -> torch.Tensor:
+    if isinstance(x, tuple):
+        state, action = x
+        if encoder is not None:
+            state = encoder(state)
+        return torch.cat((state, action), dim=-1)
+    else:
+        # Plain state tensor (e.g. ValueNet / PPO critic with no action input)
+        if encoder is not None:
+            return encoder(x)
+        return x
 
 
 class CriticNet(nn.Module):
@@ -41,27 +57,34 @@ class CriticNet(nn.Module):
 
     def __init__(
         self,
-        dim_state: int,
+        dim_state: int | tuple[int, int, int],
         dim_act: int,
         depth: int = 3,
         width: int = 256,
         act: Literal["relu", "crelu"] = "relu",
         has_norm: bool = False,
+        encoder_type: str = "light",
     ) -> None:
         super().__init__()
 
+        self.encoder: PixelEncoder | None = None
+        input_dim = dim_state
+        if isinstance(dim_state, tuple):
+            self.encoder = make_pixel_encoder(dim_state, feature_dim=width, encoder_type=encoder_type)
+            input_dim = self.encoder.output_dim
+
         self.arch = MLP(
-            dim_state + dim_act, 1, depth, width, act=act, has_norm=has_norm
+            input_dim + dim_act, 1, depth, width, act=act, has_norm=has_norm
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor | tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
         """
         Forward pass of the critic network.
 
         Args:
             x (Tensor): Concatenated observation and action tensor.
         """
-        return self.arch(x)
+        return self.arch(_prepare_state_action_input(x, self.encoder))
 
 
 class ValueNet(CriticNet):
@@ -88,8 +111,9 @@ class ValueNet(CriticNet):
         width: int = 256,
         act: str = "relu",
         has_norm: bool = False,
+        encoder_type: str = "light",
     ) -> None:
-        super().__init__(dim_state, 0, depth, width, act, has_norm)
+        super().__init__(dim_state, 0, depth, width, act, has_norm, encoder_type=encoder_type)
 
 
 class CriticNetProbabilistic(nn.Module):
@@ -107,27 +131,34 @@ class CriticNetProbabilistic(nn.Module):
 
     def __init__(
         self,
-        dim_state: int,
+        dim_state: int | tuple[int, int, int],
         dim_act: int,
         depth: int = 3,
         width: int = 256,
         act: Literal["relu", "crelu"] = "relu",
         has_norm: bool = False,
+        encoder_type: str = "light",
     ) -> None:
         super().__init__()
 
+        self.encoder: PixelEncoder | None = None
+        input_dim = dim_state
+        if isinstance(dim_state, tuple):
+            self.encoder = make_pixel_encoder(dim_state, feature_dim=width, encoder_type=encoder_type)
+            input_dim = self.encoder.output_dim
+
         self.arch = MLP(
-            dim_state + dim_act, 2, depth, width, act=act, has_norm=has_norm
+            input_dim + dim_act, 2, depth, width, act=act, has_norm=has_norm
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor | tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
         """
         Forward pass of the probabilistic critic.
 
         Args:
            x  (Tensor): Concatenated observation and action tensor.
         """
-        return self.arch(x)
+        return self.arch(_prepare_state_action_input(x, self.encoder))
 
 
 class BNNCriticNet(nn.Module):
@@ -145,18 +176,25 @@ class BNNCriticNet(nn.Module):
 
     def __init__(
         self,
-        dim_state: int,
+        dim_state: int | tuple[int, int, int],
         dim_act: int,
         depth: int = 3,
         width: int = 256,
         act: Literal["relu", "crelu"] = "relu",
         has_norm: bool = False,
+        encoder_type: str = "light",
     ) -> None:
         super().__init__()
 
+        self.encoder: PixelEncoder | None = None
+        input_dim = dim_state
+        if isinstance(dim_state, tuple):
+            self.encoder = make_pixel_encoder(dim_state, feature_dim=width, encoder_type=encoder_type)
+            input_dim = self.encoder.output_dim
+
         # A BNN with local-reparameterization layers
         self.arch = BayesianMLP(
-            dim_in=dim_state + dim_act,
+            dim_in=input_dim + dim_act,
             dim_out=1,
             depth=depth,
             width=width,
@@ -175,11 +213,11 @@ class BNNCriticNet(nn.Module):
                 layer.map(on)
 
     def forward(
-        self, x: torch.Tensor
+        self, x: torch.Tensor | tuple[torch.Tensor, torch.Tensor]
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor | None]:
         "Forward pass of the BNNCriticNet"
 
-        return self.arch(x)
+        return self.arch(_prepare_state_action_input(x, self.encoder))
 
 
 class EMstyle(nn.Module):
@@ -197,26 +235,33 @@ class EMstyle(nn.Module):
 
     def __init__(
         self,
-        dim_state: int,
+        dim_state: int | tuple[int, int, int],
         dim_act: int,
         depth: int = 3,
         width: int = 256,
         act: Literal["relu", "crelu"] = "relu",
         has_norm: bool = False,
+        encoder_type: str = "light",
     ) -> None:
         super().__init__()
+        self.encoder: PixelEncoder | None = None
+        input_dim = dim_state
+        if isinstance(dim_state, tuple):
+            self.encoder = make_pixel_encoder(dim_state, feature_dim=width, encoder_type=encoder_type)
+            input_dim = self.encoder.output_dim
+
         self.arch = MLP(
-            dim_state + dim_act, width, depth, width, act=act, has_norm=has_norm
+            input_dim + dim_act, width, depth, width, act=act, has_norm=has_norm
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor | tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
         """
         Forward pass to produce latent feature encoding.
 
         Args:
             x (Tensor): Concatenated input tensor.
         """
-        x = self.arch(x)
+        x = self.arch(_prepare_state_action_input(x, self.encoder))
         return x
 
 
@@ -235,16 +280,23 @@ class DQNNet(nn.Module):
 
     def __init__(
         self,
-        dim_state: int,
+        dim_state: int | tuple[int, int, int],
         dim_act: int,
         depth: int = 3,
         width: int = 256,
         act: str = "relu",
         has_norm: bool = False,
+        encoder_type: str = "light",
     ) -> None:
         super().__init__()
 
-        self.arch = MLP(dim_state, dim_act, depth, width, act=act, has_norm=has_norm)
+        self.encoder: PixelEncoder | None = None
+        input_dim = dim_state
+        if isinstance(dim_state, tuple):
+            self.encoder = make_pixel_encoder(dim_state, feature_dim=width, encoder_type=encoder_type)
+            input_dim = self.encoder.output_dim
+
+        self.arch = MLP(input_dim, dim_act, depth, width, act=act, has_norm=has_norm)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -253,6 +305,8 @@ class DQNNet(nn.Module):
         Args:
             x (Tensor): Concatenated observation and action tensor.
         """
+        if self.encoder is not None:
+            x = self.encoder(x)
         return self.arch(x)
 
 
