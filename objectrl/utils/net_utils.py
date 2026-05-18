@@ -134,6 +134,185 @@ class FeatureExtractor(nn.Module):
         return self.model(x)
 
 
+class PixelEncoder(nn.Module):
+    """
+    VGG-style convolutional encoder for pixel observations shaped as HWC or NHWC.
+    Uses stacked 3x3 convolutions with max pooling, similar to VGG16 architecture.
+    This provides better feature extraction for complex visual tasks like CarRacing.
+
+    HWC denotes a single image, while NHWC denotes a batch of images. The encoder
+    applies a series of convolutional layers followed by a projection to a feature space.
+    It automatically handles the addition of a batch dimension if the input is a single image.
+
+    Architecture:
+        - Block 1: 2x(Conv3x3, 64) + MaxPool → H/2 x W/2 x 64
+        - Block 2: 2x(Conv3x3, 128) + MaxPool → H/4 x W/4 x 128
+        - Block 3: 2x(Conv3x3, 256) + MaxPool → H/8 x W/8 x 256
+        - Block 4: 2x(Conv3x3, 512) + MaxPool → H/16 x W/16 x 512
+        - Flatten + Linear to feature_dim
+    """
+
+    def __init__(self, obs_shape: tuple[int, int, int], feature_dim: int = 512) -> None:
+        super().__init__()
+        if len(obs_shape) != 3:
+            raise ValueError(
+                f"PixelEncoder expects a 3D observation shape (H, W, C), got {obs_shape}"
+            )
+
+        self.obs_shape = obs_shape
+        in_channels = obs_shape[-1]
+
+        # VGG-style architecture with 4 blocks
+        self.conv = nn.Sequential(
+            # Block 1: H x W -> H/2 x W/2
+            nn.Conv2d(in_channels, 64, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            # Block 2: H/2 x W/2 -> H/4 x W/4
+            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            # Block 3: H/4 x W/4 -> H/8 x W/8
+            nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            # Block 4: H/8 x W/8 -> H/16 x W/16
+            nn.Conv2d(256, 512, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(512, 512, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+        )
+
+        with torch.no_grad():
+            sample = torch.zeros(1, *obs_shape)
+            conv_out = self._forward_conv(sample)
+            flat_dim = conv_out.shape[-1]
+
+        self.proj = nn.Sequential(
+            nn.Linear(flat_dim, feature_dim),
+            nn.ReLU(),
+            nn.LayerNorm(feature_dim),
+        )
+        self.output_dim = feature_dim
+
+    def _forward_conv(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.to(dtype=torch.float32)
+        x = x.permute(0, 3, 1, 2)
+        x = x / 255.0
+        x = self.conv(x)
+        return x.flatten(start_dim=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        add_batch_dim = x.ndim == 3
+        if add_batch_dim:
+            x = x.unsqueeze(0)
+
+        x = self._forward_conv(x)
+        x = self.proj(x)
+
+        if add_batch_dim:
+            return x.squeeze(0)
+        return x
+
+
+# Keep VGGPixelEncoder as an alias for backward compatibility
+VGGPixelEncoder = PixelEncoder
+
+
+class LightPixelEncoder(nn.Module):
+    """
+    Lightweight Nature-DQN-style convolutional encoder for pixel observations.
+
+    Three strided conv layers (32→64→64 channels) reduce a 96x96 image to a
+    compact feature vector in far fewer operations than the VGG-style encoder,
+    making it suitable for short training runs (1K-50K steps) where VGG would
+    not yet have converged its large number of parameters.
+
+    Architecture (for 96x96 input):
+        Conv(32, 8x8, s4) → ReLU   →  23x23x32
+        Conv(64, 4x4, s2) → ReLU   →  10x10x64
+        Conv(64, 3x3, s1) → ReLU   →   8x8x64  = 4096
+        Flatten → Linear(feature_dim) → ReLU → LayerNorm
+
+    Args:
+        obs_shape (tuple[int, int, int]): HWC observation shape, e.g. (96, 96, 3).
+        feature_dim (int): Output feature vector size. Default: 256.
+    """
+
+    def __init__(self, obs_shape: tuple[int, int, int], feature_dim: int = 256) -> None:
+        super().__init__()
+        if len(obs_shape) != 3:
+            raise ValueError(
+                f"LightPixelEncoder expects a 3D observation shape (H, W, C), got {obs_shape}"
+            )
+        self.obs_shape = obs_shape
+        in_channels = obs_shape[-1]
+
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels, 32, kernel_size=8, stride=4),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=4, stride=2),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1),
+            nn.ReLU(),
+        )
+
+        with torch.no_grad():
+            sample = torch.zeros(1, in_channels, obs_shape[0], obs_shape[1])
+            flat_dim = self.conv(sample).flatten(start_dim=1).shape[-1]
+
+        self.proj = nn.Sequential(
+            nn.Linear(flat_dim, feature_dim),
+            nn.ReLU(),
+            nn.LayerNorm(feature_dim),
+        )
+        self.output_dim = feature_dim
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        add_batch_dim = x.ndim == 3
+        if add_batch_dim:
+            x = x.unsqueeze(0)
+
+        x = x.to(dtype=torch.float32)
+        # HWC → CHW
+        x = x.permute(0, 3, 1, 2) / 255.0
+        x = self.conv(x).flatten(start_dim=1)
+        x = self.proj(x)
+
+        if add_batch_dim:
+            return x.squeeze(0)
+        return x
+
+
+def make_pixel_encoder(
+    obs_shape: tuple[int, int, int],
+    feature_dim: int,
+    encoder_type: str = "light",
+) -> "LightPixelEncoder | PixelEncoder":
+    """
+    Factory for pixel encoders.
+
+    Args:
+        obs_shape: HWC tuple, e.g. (96, 96, 3).
+        feature_dim: Output dimension.
+        encoder_type: ``"light"`` (default) for the Nature-DQN-style 3-conv encoder,
+                      ``"vgg"`` for the heavier VGG-style encoder.
+    """
+    if encoder_type == "vgg":
+        return PixelEncoder(obs_shape, feature_dim=feature_dim)
+    elif encoder_type == "light":
+        return LightPixelEncoder(obs_shape, feature_dim=feature_dim)
+    else:
+        raise NotImplementedError(f"encoder_type={encoder_type!r} unknown. Use 'light' or 'vgg'.")
+
+
 class MLP(nn.Module):
     def __init__(
         self,

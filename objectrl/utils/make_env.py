@@ -17,6 +17,7 @@
 # -----------------------------------------------------------------------------------
 
 import warnings
+from collections import deque
 
 import gymnasium as gym
 import numpy as np
@@ -30,6 +31,105 @@ from objectrl.utils.environment.noisy_wrappers import (
     NoisyObservationWrapper,
 )
 from objectrl.utils.environment.reward_wrappers import PositionDelayWrapper
+
+
+class RunningMeanStd:
+    """Tracks running mean and standard deviation of observations."""
+
+    def __init__(self, epsilon=1e-4, shape=()):
+        self.mean = np.zeros(shape, dtype=np.float64)
+        self.var = np.ones(shape, dtype=np.float64)
+        self.count = epsilon
+        self.epsilon = epsilon
+
+    def update(self, x):
+        batch_mean = np.mean(x, axis=0)
+        batch_var = np.var(x, axis=0)
+        batch_count = x.shape[0]
+
+        delta = batch_mean - self.mean
+        total_count = self.count + batch_count
+
+        new_mean = self.mean + delta * batch_count / total_count
+        m_a = self.var * self.count
+        m_b = batch_var * batch_count
+        M2 = m_a + m_b + np.square(delta) * self.count * batch_count / total_count
+        new_var = M2 / total_count
+
+        self.mean = new_mean
+        self.var = new_var
+        self.count = total_count
+
+
+class NormalizeObservation(gym.Wrapper):
+    """Normalizes observations using running mean and std."""
+
+    def __init__(self, env, epsilon=1e-8):
+        super().__init__(env)
+        self.epsilon = epsilon
+        self.obs_rms = RunningMeanStd(epsilon=epsilon, shape=env.observation_space.shape)
+        self.training = True
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        if self.training:
+            self.obs_rms.update(obs[np.newaxis, ...])
+        return self._normalize(obs), reward, terminated, truncated, info
+
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        if self.training:
+            self.obs_rms.update(obs[np.newaxis, ...])
+        return self._normalize(obs), info
+
+    def _normalize(self, obs):
+        return (obs - self.obs_rms.mean) / np.sqrt(self.obs_rms.var + self.epsilon)
+
+
+class FrameStack(gym.Wrapper):
+    """Stacks the last n frames for temporal context.
+
+    Fixed implementation:
+    - Initializes with zeros for proper temporal history
+    - Only fills frames with actual observations as they arrive
+    - Prevents duplicate-frame bug that hurt training
+    """
+
+    def __init__(self, env, n_frames=4):
+        super().__init__(env)
+        self.n_frames = n_frames
+        self.frames = deque(maxlen=n_frames)
+
+        # Update observation space
+        orig_space = env.observation_space
+        if isinstance(orig_space, gym.spaces.Box):
+            # Shape: (H, W, C) -> (H, W, C * n_frames)
+            h, w, c = orig_space.shape
+            new_shape = (h, w, c * n_frames)
+            self.observation_space = gym.spaces.Box(
+                low=0, high=255, shape=new_shape, dtype=orig_space.dtype
+            )
+
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        # FIXED: Clear frames and append only the initial obs once
+        self.frames.clear()
+        # Fill with zeros first to indicate "no history yet"
+        zero_frame = np.zeros_like(obs)
+        for _ in range(self.n_frames - 1):
+            self.frames.append(zero_frame)
+        # Only the most recent slot gets the actual observation
+        self.frames.append(obs)
+        return self._get_obs(), info
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        self.frames.append(obs)
+        return self._get_obs(), reward, terminated, truncated, info
+
+    def _get_obs(self):
+        # Concatenate frames along channel dimension
+        return np.concatenate(list(self.frames), axis=-1)
 
 gymnasium_mujoco_mappings = {
     "ant": "Ant-v5",
@@ -81,12 +181,14 @@ env_mappings = {
 }
 
 
-def _flatten_if_needed(env: gym.Env) -> gym.Env:
+def _flatten_if_needed(env: gym.Env, keep_image_obs: bool = False) -> gym.Env:
     """Flatten image- or tensor-shaped Box observations to 1D vectors."""
     if (
         isinstance(env.observation_space, gym.spaces.Box)
         and len(env.observation_space.shape) > 1
     ):
+        if keep_image_obs and len(env.observation_space.shape) == 3:
+            return env
         env = FlattenObservation(env)
     return env
 
@@ -105,6 +207,8 @@ def make_env(  # noqa: C901
     - Action rescaling to [-1, 1]
     - Noisy action and/or observation wrappers
     - Delayed reward and control cost penalties via PositionDelayWrapper
+    - Frame stacking for temporal context (use_frame_stack)
+    - Observation normalization (normalize_obs)
     - Reproducibility via consistent seeding for Gym, NumPy, and PyTorch
 
     Args:
@@ -115,6 +219,8 @@ def make_env(  # noqa: C901
             - env_config.noisy.noisy_obs (float): Std of Gaussian noise for observations.
             - env_config.position_delay (int): Delay threshold for reward.
             - env_config.control_cost_weight (float): Weight for control cost in reward.
+            - env_config.use_frame_stack (bool): Whether to stack the last 4 frames.
+            - env_config.normalize_obs (bool): Whether to normalize observations.
         eval_env (bool, optional): If True, modifies seed to separate training/testing. Defaults to False.
         num_envs (int, optional): Number of environments which are parallelized if > 1. Defaults to 1.
 
@@ -129,6 +235,7 @@ def make_env(  # noqa: C901
     seed = seed + (100 if eval_env else 0)
     # Check if the env is in gym.
     env_name = env_mappings.get(env_name, env_name)
+    keep_image_obs = bool(getattr(env_config, "use_cnn", False))
 
     # ruff: noqa: C901
     def _make_single_env():
@@ -187,7 +294,7 @@ def make_env(  # noqa: C901
         else:
             raise gym.error.Error(f"Environment '{env_name}' not found.")
 
-        env = _flatten_if_needed(env)
+        env = _flatten_if_needed(env, keep_image_obs=keep_image_obs)
 
         if not isinstance(env.action_space, gym.spaces.Discrete):
             env = RescaleAction(env, np.float32(-1.0), np.float32(1.0))
@@ -204,10 +311,22 @@ def make_env(  # noqa: C901
                 position_delay=env_config.position_delay,
                 ctrl_w=env_config.control_cost_weight,
             )
+
+        # FIXED: Apply normalization FIRST (before stacking)
+        # CRITICAL: Add observation normalization for stability
+        if getattr(env_config, "normalize_obs", False):
+            env = NormalizeObservation(env)
+
+        # CRITICAL: Add frame stacking for temporal context (required for CarRacing)
+        # Applied AFTER normalization so we stack normalized frames
+        if getattr(env_config, "use_frame_stack", False) and keep_image_obs:
+            n_frames = getattr(env_config, "n_frames", 4)
+            env = FrameStack(env, n_frames=n_frames)
+
         return env
 
     def _make_wrappers(env, env_config):
-        env = _flatten_if_needed(env)
+        env = _flatten_if_needed(env, keep_image_obs=keep_image_obs)
 
         if not isinstance(env.action_space, gym.spaces.Discrete):
             env = RescaleAction(env, np.float32(-1.0), np.float32(1.0))
