@@ -1,0 +1,46 @@
+# GRPO++ Model Configuration
+# Extended from vanilla GRPO with DAPO asymmetric clipping and Dr. GRPO aggregation
+
+model:
+  name: grpo_pp
+
+  # Basic settings
+  loss: MSELoss
+  tau: 0.0
+  policy_delay: 1
+  max_grad_norm: 0.5
+
+  # DAPO: Asymmetric clipping bounds
+  # Tighter bound for positive advantages prevents policy collapse
+  clip_rate_high: 0.1
+  # Looser bound for negative advantages allows rapid rejection of bad policies
+  # Conservative default (0.3) for stability; increase to 0.5 if training is stable
+  clip_rate_low: 0.3
+
+  # Advantage normalization
+  normalize_advantages: true
+
+  # Zero KL penalty (removed standard KL tax for faster convergence)
+  entropy_coef: 0.0
+
+  # Group rollout configuration
+  group_size: 8
+  max_episode_length: 1000
+  gamma: 0.99
+
+  # Actor configuration
+  actor:
+    arch: GRPOPlusActorNetProbabilistic
+    actor_type: GRPOPlusActor
+    has_target: false
+    width: 64
+    max_grad_norm: 0.5
+
+  # Critic configuration
+  critic:
+    arch: ValueNet
+    critic_type: GRPOPlusCritic
+    has_target: false
+    n_members: 1
+    width: 64
+    max_grad_norm: 0.5
