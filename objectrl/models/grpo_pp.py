@@ -50,6 +50,7 @@ from tensordict import TensorDict
 from objectrl.models.basic.ac import ActorCritic
 from objectrl.models.basic.actor import Actor
 from objectrl.models.basic.critic import CriticEnsemble
+from objectrl.replay_buffers.group_rollout_buffer import GroupRolloutBuffer
 from objectrl.utils.net_utils import MLP, make_pixel_encoder
 
 if __name__ == "__main__":
@@ -233,18 +234,18 @@ class GRPOPlusActor(Actor):
             # Apply mask: zero out invalid (padded) timesteps
             policy_loss_per_step = policy_loss_per_step * valid_mask
 
-        # CRITICAL: Sum over time dimension, then mean over group dimension
-        # This preserves episode length in the gradient magnitude
-        # Expected input shape: [group_size, max_episode_length]
-        # If input is flattened, we need to reshape
+        # CRITICAL: Sum over time dimension, then mean over group dimension.
+        # If the caller flattened to [group_size * max_episode_length], reshape
+        # back so the sum/mean split actually preserves episode length in the
+        # gradient magnitude.
+        group_size = self.config.model.group_size
+        if policy_loss_per_step.dim() == 1 and policy_loss_per_step.numel() % group_size == 0:
+            max_len = policy_loss_per_step.numel() // group_size
+            policy_loss_per_step = policy_loss_per_step.view(group_size, max_len)
 
-        if len(policy_loss_per_step.shape) == 1:
-            # Flattened batch: assume it's already been properly handled
-            # Use standard mean (this should not happen in proper GRPO++ usage)
+        if policy_loss_per_step.dim() == 1:
             loss = policy_loss_per_step.mean()
         else:
-            # Proper shape [group_size, max_episode_length] or similar
-            # Sum over time dimension (dim=1), then mean over group (dim=0)
             loss = policy_loss_per_step.sum(dim=-1).mean()
 
         # Add entropy bonus if configured (helps exploration)
@@ -401,6 +402,23 @@ class GroupRelativePolicyOptimizationPlusPlus(ActorCritic):
         assert config.training.warmup_steps == 0, "GRPO++ does not support warmup steps"
         super().__init__(config, critic_type, actor_type)
 
+        self.group_size = config.model.group_size
+        self.max_episode_length = config.model.max_episode_length
+
+        # Replace the default flat ReplayBuffer with the structured group rollout buffer.
+        self.experience_memory = GroupRolloutBuffer(
+            group_size=self.group_size,
+            max_episode_length=self.max_episode_length,
+            state_dim=self.dim_state,
+            action_dim=self.dim_act,
+            device=torch.device(config.system.storing_device),
+            gamma=config.training.gamma,
+            use_identical_seeding=False,
+        )
+        self._episode_idx = 0
+        self._step_in_episode = 0
+        self._completed_episodes = 0
+
     def generate_transition(self, **kwargs):
         """
         Generates a transition dictionary for the group rollout buffer.
@@ -418,59 +436,99 @@ class GroupRelativePolicyOptimizationPlusPlus(ActorCritic):
                 "reward": kwargs["reward"],
                 "next_state": kwargs["next_state"],
                 "terminated": kwargs["terminated"],
+                "truncated": kwargs["truncated"],
                 "action_logprob": kwargs["action_logprob"],
             },
             batch_size=[],
         )
         return transition
 
+    def store_transition(self, transition) -> None:
+        """
+        Writes a single transition into the group rollout buffer.
+
+        Sequential episodes are mapped to consecutive group slots: episode k goes
+        into group_idx = k % group_size at its own per-episode timestep.
+        """
+        buf = self.experience_memory
+        group_idx = self._episode_idx % self.group_size
+        t = self._step_in_episode
+
+        terminated = bool(transition["terminated"])
+        truncated = bool(transition["truncated"])
+        episode_end = terminated or truncated
+
+        if t < self.max_episode_length:
+            buf_device = buf.device
+            buf.states[group_idx, t] = transition["state"].to(buf_device)
+            buf.actions[group_idx, t] = transition["action"].to(buf_device)
+            buf.logprobs[group_idx, t] = transition["action_logprob"].to(buf_device)
+            buf.rewards[group_idx, t] = float(transition["reward"])
+            buf.terminated[group_idx, t] = terminated
+            buf.valid_mask[group_idx, t] = True
+            buf.current_lengths[group_idx] = t + 1
+
+        self._step_in_episode += 1
+
+        if episode_end:
+            self._completed_episodes += 1
+            self._episode_idx += 1
+            self._step_in_episode = 0
+
     def learn(self, max_iter: int = 1, n_epochs: int = 0) -> None:
         """
         Learns from the group rollout buffer using GRPO++ update rules.
 
+        Gated on collecting at least ``group_size`` completed episodes so that
+        every group slot holds a real trajectory before advantage normalization.
+
         Args:
             max_iter (int): Maximum number of update iterations.
-            n_epochs (int): Number of passes over the memory (not typically used with GRPO++).
+            n_epochs (int): Number of passes over the collected group batch.
         """
-        # Check if we have data
-        if len(self.experience_memory) == 0:
+        # Need at least group_size completed episodes before computing group-relative advantages.
+        if self._completed_episodes < self.group_size:
             return None
 
         # Get the complete group rollout batch with computed advantages
         batch = self.experience_memory.get_batch()
 
-        # Extract data from batch
-        states = batch["state"]  # [group_size, max_episode_length, state_dim]
-        actions = batch["action"]  # [group_size, max_episode_length, action_dim]
-        logprobs = batch["logprob"]  # [group_size, max_episode_length]
-        advantages = batch["advantages"]  # [group_size, max_episode_length]
-        returns = batch["returns"]  # [group_size, max_episode_length]
-        valid_mask = batch["valid_mask"]  # [group_size, max_episode_length]
+        # Move batch to compute device for updates.
+        compute_device = torch.device(self.config.system.device)
+        states = batch["state"].to(compute_device)
+        actions = batch["action"].to(compute_device)
+        logprobs = batch["logprob"].to(compute_device)
+        advantages = batch["advantages"].to(compute_device)
+        returns = batch["returns"].to(compute_device)
+        valid_mask = batch["valid_mask"].to(compute_device).float()
 
-        # Flatten for processing (but keep group structure for aggregation)
         group_size, max_len = states.shape[:2]
-        states_flat = states.view(group_size * max_len, -1)
+        if isinstance(self.dim_state, tuple):
+            states_flat = states.view(group_size * max_len, *self.dim_state)
+        else:
+            states_flat = states.view(group_size * max_len, -1)
         actions_flat = actions.view(group_size * max_len, -1)
         logprobs_flat = logprobs.view(group_size * max_len)
         advantages_flat = advantages.view(group_size * max_len)
         valid_mask_flat = valid_mask.view(group_size * max_len)
         returns_flat = returns.view(group_size * max_len)
 
-        # Update actor with GRPO++ loss (handles reshaping internally)
-        self.actor.update(
-            states_flat,
-            actions_flat,
-            logprobs_flat,
-            advantages_flat,
-            valid_mask_flat,
-        )
+        n_passes = max(1, n_epochs)
+        for _ in range(n_passes):
+            self.actor.update(
+                states_flat,
+                actions_flat,
+                logprobs_flat,
+                advantages_flat,
+                valid_mask_flat,
+            )
+            self.critic.update(states_flat, returns_flat, valid_mask_flat)
+            self.n_iter += 1
 
-        # Update critic (optional in GRPO++, but included for value function learning)
-        self.critic.update(states_flat, returns_flat, valid_mask_flat)
-
-        self.n_iter += 1
-
-        # Reset the buffer after learning (on-policy algorithm)
+        # Reset the buffer after learning (on-policy algorithm).
         self.experience_memory.reset()
+        self._episode_idx = 0
+        self._step_in_episode = 0
+        self._completed_episodes = 0
 
         return None
