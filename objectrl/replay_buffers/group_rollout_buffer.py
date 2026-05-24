@@ -284,7 +284,7 @@ class GroupRolloutBuffer:
         Get the complete group rollout batch with computed advantages.
 
         Returns:
-            TensorDict: Batch containing states, actions, logprobs, advantages, returns, and valid_mask.
+            TensorDict: Batch containing states, actions, logprobs, advantages, returns, rewards, and valid_mask.
         """
         # Compute returns and advantages
         returns = self.compute_mc_returns()
@@ -298,6 +298,7 @@ class GroupRolloutBuffer:
                 "logprob": self.logprobs,  # [group_size, max_episode_length]
                 "advantages": advantages,  # [group_size, max_episode_length]
                 "returns": returns,  # [group_size, max_episode_length]
+                "rewards": self.rewards,  # [group_size, max_episode_length] - for adaptive normalization
                 "valid_mask": self.valid_mask,  # [group_size, max_episode_length]
             },
             batch_size=[self.group_size],

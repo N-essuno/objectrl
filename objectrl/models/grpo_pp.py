@@ -33,7 +33,12 @@ GRPO++ extends vanilla GRPO with several key improvements:
    - Accelerates convergence in deterministic physical environments
    - Relies on group-wise normalization for stability instead
 
-4. **Group Rollout Buffer**: Structured storage with [group_size, max_episode_length, feature_dim]
+4. **Adaptive Advantage Normalization**: Dynamic normalization based on reward sparsity
+   - Adjusts normalization strength based on reward distribution
+   - Prevents over-normalization in dense reward environments
+   - Enhances signal in sparse reward environments
+
+5. **Group Rollout Buffer**: Structured storage with [group_size, max_episode_length, feature_dim]
    - Proper masking for variable-length episodes
    - Time-aligned advantage computation using Monte Carlo returns
    - Synchronized seeding for identical initial states across groups
@@ -55,6 +60,66 @@ from objectrl.utils.net_utils import MLP, make_pixel_encoder
 
 if __name__ == "__main__":
     from objectrl.config.config import MainConfig
+
+
+class AdaptiveNormalizer:
+    """
+    Adaptive advantage normalization for sparse rewards.
+
+    Dynamically adjusts normalization strength based on reward distribution:
+    - Sparse rewards (low variance): stronger normalization for stability
+    - Dense rewards (high variance): lighter normalization to preserve signal
+
+    Args:
+        epsilon (float): Small constant for numerical stability.
+        momentum (float): Moving average momentum for statistics.
+    """
+
+    def __init__(self, epsilon: float = 1e-8, momentum: float = 0.99):
+        self.epsilon = epsilon
+        self.momentum = momentum
+        self.registered = False
+
+    def register_buffers(self, module: nn.Module):
+        """Register running statistics as buffers."""
+        module.register_buffer("running_mean", torch.zeros(1))
+        module.register_buffer("running_var", torch.ones(1))
+        module.register_buffer("running_count", torch.tensor(0.0))
+        self.registered = True
+
+    def compute_sparsity_metric(self, rewards: torch.Tensor, valid_mask: torch.Tensor) -> float:
+        """
+        Compute reward sparsity metric.
+
+        Lower values indicate sparser rewards (more zeros/near-zeros).
+
+        Args:
+            rewards: Reward tensor [group_size, max_episode_length]
+            valid_mask: Valid timestep mask [group_size, max_episode_length]
+
+        Returns:
+            float: Sparsity metric (0 = very sparse, 1 = dense)
+        """
+        # Only consider valid timesteps
+        valid_rewards = rewards[valid_mask]
+
+        if len(valid_rewards) == 0:
+            return 0.0
+
+        # Compute coefficient of variation (std/mean)
+        mean_reward = valid_rewards.mean()
+        std_reward = valid_rewards.std()
+
+        if abs(mean_reward) < self.epsilon:
+            return 0.0
+
+        cv = std_reward / (abs(mean_reward) + self.epsilon)
+
+        # Normalize to [0, 1] range
+        # CV > 1.0 indicates very dense rewards, CV < 0.1 indicates very sparse
+        sparsity = torch.clamp(cv / 2.0, 0.0, 1.0)
+
+        return sparsity.item()
 
 
 class GRPOPlusActorNetProbabilistic(nn.Module):
@@ -144,6 +209,7 @@ class GRPOPlusActor(Actor):
     - DAPO asymmetric clipping: different bounds for positive/negative advantages
     - Dr. GRPO aggregation: sum over time, mean over group (not mean over both)
     - Zero KL penalty: removed for faster convergence in deterministic environments
+    - Adaptive normalization: adjusts normalization strength based on reward sparsity
 
     Args:
         config (MainConfig): Configuration object.
@@ -154,6 +220,10 @@ class GRPOPlusActor(Actor):
     def __init__(self, config: "MainConfig", dim_state: int, dim_act: int) -> None:
         super().__init__(config, dim_state, dim_act)
 
+        # Initialize adaptive normalizer
+        self.adaptive_normalizer = AdaptiveNormalizer()
+        self.adaptive_normalizer.register_buffers(self)
+
     def loss(
         self,
         state: torch.Tensor,
@@ -161,6 +231,7 @@ class GRPOPlusActor(Actor):
         action_logprob: torch.Tensor,
         advantages: torch.Tensor,
         valid_mask: Optional[torch.Tensor] = None,
+        rewards: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Calculates the GRPO++ loss with DAPO asymmetric clipping and Dr. GRPO aggregation.
@@ -174,6 +245,11 @@ class GRPOPlusActor(Actor):
         - Mean over group dimension (stable updates across groups)
         - Applies valid_mask to handle variable-length episodes
 
+        Adaptive Normalization:
+        - Computes reward sparsity metric
+        - Adjusts advantage normalization strength dynamically
+        - Stronger normalization for sparse rewards, lighter for dense rewards
+
         Mathematical Formulation:
         ```
         ratio = exp(log π(a|s) - log π_old(a|s))
@@ -182,10 +258,17 @@ class GRPOPlusActor(Actor):
         clip_low = 1 - epsilon_low   # For negative advantages
         clip_high = 1 + epsilon_high  # For positive advantages
 
+        # Adaptive normalization based on reward sparsity
+        sparsity = compute_sparsity(rewards)
+        alpha = adaptive_mixing_factor(sparsity)  # Higher for sparse rewards
+
+        # Normalize advantages with adaptive strength
+        A_normalized = alpha * normalize(A) + (1 - alpha) * A
+
         # Clipped surrogate with asymmetric bounds
         L_clip = min(
-            ratio * A,
-            clip(ratio, clip_low, clip_high) * A
+            ratio * A_normalized,
+            clip(ratio, clip_low, clip_high) * A_normalized
         )
 
         # Dr. GRPO aggregation: sum over time, mean over group
@@ -199,6 +282,7 @@ class GRPOPlusActor(Actor):
             advantages (torch.Tensor): Advantage estimates with shape [batch_size].
             valid_mask (torch.Tensor, optional): Boolean mask for valid timesteps.
                 Shape [batch_size]. Used to exclude padded timesteps from loss computation.
+            rewards (torch.Tensor, optional): Rewards for adaptive normalization.
 
         Returns:
             torch.Tensor: Computed loss scalar.
@@ -211,20 +295,66 @@ class GRPOPlusActor(Actor):
         log_ratio = new_logprob - action_logprob
         ratio = torch.exp(log_ratio)
 
+        # Adaptive Normalization: Adjust advantages based on reward sparsity
+        adaptive_advantages = advantages.clone()
+        if rewards is not None and valid_mask is not None:
+            # Reshape rewards to match advantages if needed
+            if rewards.dim() != advantages.dim():
+                group_size = self.config.model.group_size
+                if advantages.numel() % group_size == 0:
+                    max_len = advantages.numel() // group_size
+                    advantages_reshaped = advantages.view(group_size, max_len)
+                    rewards_reshaped = rewards.view(group_size, max_len) if rewards.dim() == advantages.dim() else rewards
+                    valid_mask_reshaped = valid_mask.view(group_size, max_len) if valid_mask.dim() == advantages.dim() else valid_mask
+                else:
+                    advantages_reshaped = advantages
+                    rewards_reshaped = rewards
+                    valid_mask_reshaped = valid_mask
+            else:
+                advantages_reshaped = advantages
+                rewards_reshaped = rewards
+                valid_mask_reshaped = valid_mask
+
+            # Compute reward sparsity
+            sparsity = self.adaptive_normalizer.compute_sparsity_metric(
+                rewards_reshaped, valid_mask_reshaped
+            )
+
+            # Adaptive mixing factor: higher for sparse rewards (stronger normalization)
+            # Sparsity < 0.3: sparse rewards -> use normalized advantages
+            # Sparsity > 0.7: dense rewards -> use raw advantages
+            alpha = 1.0 - torch.clamp(torch.tensor(sparsity), 0.3, 0.7)
+
+            # Apply adaptive normalization
+            if advantages_reshaped.dim() == 2:  # [group_size, max_len]
+                # Normalize within each timestep across group dimension
+                mean = advantages_reshaped.mean(dim=0, keepdim=True)
+                std = advantages_reshaped.std(dim=0, keepdim=True)
+                normalized_advantages = (advantages_reshaped - mean) / (std + 1e-8)
+
+                # Apply adaptive mixing
+                adaptive_advantages_reshaped = alpha * normalized_advantages + (1 - alpha) * advantages_reshaped
+
+                # Flatten back
+                if advantages.dim() == 1:
+                    adaptive_advantages = adaptive_advantages_reshaped.view(-1)
+                else:
+                    adaptive_advantages = adaptive_advantages_reshaped
+
         # DAPO: Asymmetric clipping bounds
         epsilon_high = self.config.model.clip_rate_high  # Tighter bound for positive advantages
         epsilon_low = self.config.model.clip_rate_low    # Looser bound for negative advantages
 
         # Apply asymmetric clipping
         clipped_ratio = torch.where(
-            advantages >= 0,
+            adaptive_advantages >= 0,
             torch.clamp(ratio, 1 - epsilon_high, 1 + epsilon_high),  # Positive advantages: tight bound
             torch.clamp(ratio, 1 - epsilon_low, 1 + epsilon_low),    # Negative advantages: loose bound
         )
 
-        # Surrogate objectives
-        surrogate = ratio * advantages
-        clipped_surrogate = clipped_ratio * advantages
+        # Surrogate objectives using adaptive advantages
+        surrogate = ratio * adaptive_advantages
+        clipped_surrogate = clipped_ratio * adaptive_advantages
 
         # PPO-style clipped objective (min of surrogate and clipped)
         policy_loss_per_step = -torch.min(surrogate, clipped_surrogate)
@@ -269,6 +399,7 @@ class GRPOPlusActor(Actor):
         action_logprob: torch.Tensor,
         advantages: torch.Tensor,
         valid_mask: Optional[torch.Tensor] = None,
+        rewards: Optional[torch.Tensor] = None,
     ) -> None:
         """
         Performs gradient update on the actor network.
@@ -279,9 +410,10 @@ class GRPOPlusActor(Actor):
             action_logprob (torch.Tensor): Log-probs of sampled actions.
             advantages (torch.Tensor): Advantage estimates.
             valid_mask (torch.Tensor, optional): Boolean mask for valid timesteps.
+            rewards (torch.Tensor, optional): Rewards for adaptive normalization.
         """
         self.optim.zero_grad()
-        loss = self.loss(state, actions, action_logprob, advantages, valid_mask)
+        loss = self.loss(state, actions, action_logprob, advantages, valid_mask, rewards)
         loss.backward()
 
         # Clip gradients if necessary
@@ -502,6 +634,11 @@ class GroupRelativePolicyOptimizationPlusPlus(ActorCritic):
         returns = batch["returns"].to(compute_device)
         valid_mask = batch["valid_mask"].to(compute_device).float()
 
+        # Get rewards for adaptive normalization (stored in buffer)
+        rewards = batch.get("rewards", None)
+        if rewards is not None:
+            rewards = rewards.to(compute_device)
+
         group_size, max_len = states.shape[:2]
         if isinstance(self.dim_state, tuple):
             states_flat = states.view(group_size * max_len, *self.dim_state)
@@ -512,6 +649,7 @@ class GroupRelativePolicyOptimizationPlusPlus(ActorCritic):
         advantages_flat = advantages.view(group_size * max_len)
         valid_mask_flat = valid_mask.view(group_size * max_len)
         returns_flat = returns.view(group_size * max_len)
+        rewards_flat = rewards.view(group_size * max_len) if rewards is not None else None
 
         n_passes = max(1, n_epochs)
         for _ in range(n_passes):
@@ -521,6 +659,7 @@ class GroupRelativePolicyOptimizationPlusPlus(ActorCritic):
                 logprobs_flat,
                 advantages_flat,
                 valid_mask_flat,
+                rewards_flat,  # Pass rewards for adaptive normalization
             )
             self.critic.update(states_flat, returns_flat, valid_mask_flat)
             self.n_iter += 1

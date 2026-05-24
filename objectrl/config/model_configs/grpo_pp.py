@@ -82,10 +82,11 @@ class GRPO_PPConfig:
     """
     Full configuration for a GRPO++ agent.
 
-    GRPO++ introduces three key improvements over vanilla GRPO:
+    GRPO++ introduces four key improvements over vanilla GRPO:
     1. DAPO asymmetric clipping (clip_rate_high and clip_rate_low)
     2. Dr. GRPO aggregation (sum over time, mean over group)
     3. Zero KL penalty (removed standard KL tax)
+    4. Adaptive normalization (adjusts normalization strength based on reward sparsity)
 
     Attributes:
         name (str): Identifier name for the GRPO++ configuration.
@@ -96,6 +97,7 @@ class GRPO_PPConfig:
         clip_rate_high (float): Tighter clipping bound for positive advantages (DAPO).
         clip_rate_low (float): Looser clipping bound for negative advantages (DAPO).
         normalize_advantages (bool): Whether to normalize advantages during training.
+        adaptive_normalization (bool): Whether to use adaptive advantage normalization.
         entropy_coef (float): Coefficient for entropy regularization.
         group_size (int): Number of parallel environments/trajectories per group.
         max_episode_length (int): Maximum trajectory length for buffer allocation.
@@ -119,6 +121,7 @@ class GRPO_PPConfig:
     clip_rate_low: float = 0.3
 
     normalize_advantages: bool = True
+    adaptive_normalization: bool = True  # Enable adaptive normalization for sparse rewards
     entropy_coef: float = 0.0  # Zero KL penalty
 
     # Group rollout configuration
