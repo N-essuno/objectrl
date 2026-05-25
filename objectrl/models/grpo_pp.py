@@ -581,7 +581,15 @@ class GroupRelativePolicyOptimizationPlusPlus(ActorCritic):
 
         Sequential episodes are mapped to consecutive group slots: episode k goes
         into group_idx = k % group_size at its own per-episode timestep.
+
+        Once all group slots are filled, additional transitions are dropped until
+        learn() is called and resets the buffer. This prevents new episodes from
+        overwriting data that hasn't been learned from yet.
         """
+        # Guard: if the buffer is full (waiting for learn()), drop the transition
+        if self._completed_episodes >= self.group_size:
+            return
+
         buf = self.experience_memory
         group_idx = self._episode_idx % self.group_size
         t = self._step_in_episode

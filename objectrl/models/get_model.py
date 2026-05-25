@@ -23,6 +23,7 @@ from objectrl.models.drnd import DRND
 from objectrl.models.dsac import DistributionalSoftActorCritic
 from objectrl.models.grpo import GroupRelativePolicyOptimization
 from objectrl.models.grpo_pp import GroupRelativePolicyOptimizationPlusPlus
+from objectrl.models.grpo_pp_v2 import GRPOPlusV2
 from objectrl.models.oac import OptimisticActorCritic
 from objectrl.models.pbac import PACBayesianAC
 from objectrl.models.ppo import ProximalPolicyOptimization
@@ -77,6 +78,10 @@ def get_model(config) -> object:  # noqa: C901
             )
         case "grpo_pp":
             return GroupRelativePolicyOptimizationPlusPlus(
+                config, critic.critic_type, actor.actor_type
+            )
+        case "grpo_pp_v2":
+            return GRPOPlusV2(
                 config, critic.critic_type, actor.actor_type
             )
         case "redq":
