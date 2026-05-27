@@ -48,6 +48,9 @@ class GRPOCriticConfig:
     """
     Configuration for the GRPO critic network.
 
+    In vanilla GRPO, the critic is not used for advantage computation — advantages
+    come from group statistics. The critic is trained to predict MC returns only.
+
     Attributes:
         arch (type): The architecture class to be used for the critic network.
         critic_type (type): The class implementing the GRPO critic logic.
@@ -68,20 +71,25 @@ class GRPOCriticConfig:
 @dataclass
 class GRPOConfig:
     """
-    Full configuration for a GRPO agent, including actor, critic, and optimization hyperparameters.
+    Full configuration for a vanilla GRPO agent.
+
+    Vanilla GRPO eliminates the learned value baseline. Advantages are computed
+    as MC returns normalized across the group at each timestep. The critic is
+    optional and only trains to predict MC returns.
 
     Attributes:
         name (str): Identifier name for the GRPO configuration.
         loss (str): Name of the loss function to use (e.g., 'MSELoss').
-        tau (float): Polyak averaging coefficient for target network updates.
+        tau (float): Polyak averaging coefficient (unused in vanilla GRPO, kept for compat).
         policy_delay (int): Delay interval between policy (actor) updates.
         max_grad_norm (float): Maximum norm for gradient clipping globally.
-        clip_rate (float): Clipping factor for the GRPO objective.
-        GAE_lambda (float): Lambda parameter for Generalized Advantage Estimation.
+        clip_rate (float): Symmetric clipping factor for the GRPO objective.
+        GAE_lambda (float): Lambda for GAE (unused in vanilla GRPO, kept for compat).
         normalize_advantages (bool): Whether to normalize advantages during training.
         entropy_coef (float): Coefficient for entropy regularization.
-        n_groups (int): Number of groups for group-wise updates.
-        group_size (int): Number of trajectories per group.
+        group_size (int): Number of trajectories per group rollout.
+        max_episode_length (int): Maximum episode length for buffer sizing.
+        gamma (float): Discount factor for MC returns.
         actor (GRPOActorConfig): Configuration object for the GRPO actor.
         critic (GRPOCriticConfig): Configuration object for the GRPO critic.
     """
@@ -96,8 +104,9 @@ class GRPOConfig:
     GAE_lambda: float = 0.95
     normalize_advantages: bool = True
     entropy_coef: float = 0.0
-    n_groups: int = 8
     group_size: int = 4
+    max_episode_length: int = 1000
+    gamma: float = 0.99
 
     actor: GRPOActorConfig = field(default_factory=GRPOActorConfig)
     critic: GRPOCriticConfig = field(default_factory=GRPOCriticConfig)

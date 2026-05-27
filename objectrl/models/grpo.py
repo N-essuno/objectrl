@@ -17,14 +17,23 @@
 # -----------------------------------------------------------------------------------
 
 """
-Group Relative Policy Optimization (GRPO) Implementation.
+Group Relative Policy Optimization (GRPO) — Vanilla Implementation.
 
-GRPO extends PPO by using group-wise updates. Instead of computing advantages
-relative to a baseline value function, GRPO samples multiple groups of trajectories
-and computes advantages relative to the group average.
+Vanilla GRPO (DeepSeekMath) eliminates the learned value baseline entirely.
+Instead of training a critic to predict V(s) and using it as a GAE baseline,
+GRPO samples groups of trajectories and computes advantages relative to the
+group mean at each timestep (time-aligned group normalization).
 
-This implementation follows the vanilla GRPO algorithm as described in the
-DeepSeekMath paper, adapted for continuous control tasks.
+Algorithm:
+1. Collect G episodes into a structured buffer [G, T, *state_dim]
+2. Compute Monte Carlo returns-to-go: R_t = sum_{k=t}^{T} gamma^{k-t} r_k
+3. Normalize across group at each timestep:
+   A_{i,t} = (R_{i,t} - mean_j(R_{j,t})) / (std_j(R_{j,t}) + eps)
+4. Update actor with symmetric PPO clipping (epsilon=0.2), mean aggregation
+5. Update critic to predict MC returns (optional — critic not used for advantages)
+
+Reference: DeepSeekMath: Pushing the Limits of Mathematical Reasoning
+in Open Language Models (2024)
 """
 
 import typing
@@ -37,6 +46,7 @@ from torch import nn as nn
 from objectrl.models.basic.ac import ActorCritic
 from objectrl.models.basic.actor import Actor
 from objectrl.models.basic.critic import CriticEnsemble
+from objectrl.replay_buffers.group_rollout_buffer import GroupRolloutBuffer
 from objectrl.utils.net_utils import MLP, make_pixel_encoder
 
 if typing.TYPE_CHECKING:
@@ -121,7 +131,11 @@ class GRPOActorNetProbabilistic(nn.Module):
 
 class GRPOActor(Actor):
     """
-    GRPO Actor implementation.
+    GRPO Actor with standard symmetric PPO clipping and mean aggregation.
+
+    Vanilla GRPO uses the same clipping bound for positive and negative
+    advantages (epsilon=0.2), and aggregates the loss by averaging uniformly
+    over all timesteps and episodes.
 
     Args:
         config (MainConfig): Configuration object.
@@ -140,36 +154,33 @@ class GRPOActor(Actor):
         advantages: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Calculates the GRPO clipped surrogate loss.
-
-        The key difference from PPO is that advantages are computed relative
-        to group averages rather than value function baselines.
+        Calculates the GRPO clipped surrogate loss with symmetric clipping.
 
         Args:
             state (torch.Tensor): State input.
             actions (torch.Tensor): Actions taken.
             action_logprob (torch.Tensor): Old log-probs of actions.
-            advantages (torch.Tensor): Advantage estimates (relative to group avg).
+            advantages (torch.Tensor): Group-normalized advantages (from MC returns).
 
         Returns:
-            torch.Tensor: Computed loss.
+            torch.Tensor: Computed loss scalar.
         """
         act_dict = self.act(state, is_training=True)
         new_logprob = act_dict["dist"].log_prob(actions).sum(dim=-1)
         log_ratio = new_logprob - action_logprob
         ratio = torch.exp(log_ratio)
 
-        # Calculate the surrogate loss
+        # Symmetric PPO clipping
         weighted_advantages = advantages * ratio
         weighted_clipped_advantages = advantages * torch.clamp(
             ratio,
             1 - self.config.model.clip_rate,
             1 + self.config.model.clip_rate,
         )
-        # Calculate the policy gradient loss using the clipped surrogate objective
+        # Mean aggregation over all timesteps
         loss = -torch.min(weighted_advantages, weighted_clipped_advantages).mean()
 
-        # Add entropy loss if configured
+        # Add entropy bonus if configured
         if self.config.model.entropy_coef > 0:
             entropy_loss = act_dict["dist"].entropy().sum(-1).mean()
             loss += -self.config.model.entropy_coef * entropy_loss
@@ -195,25 +206,21 @@ class GRPOActor(Actor):
         self.optim.zero_grad()
         loss = self.loss(state, actions, action_logprob, advantages)
         loss.backward()
-        # Clip gradients if necessary
         if self.config.model.actor.max_grad_norm > 0:
             nn.utils.clip_grad_norm_(
                 self.parameters(),
                 self.config.model.actor.max_grad_norm,
             )
-        # Step the optimizer
         self.optim.step()
-
-        self.iter += 1  # Increment iteration counter
+        self.iter += 1
 
 
 class GRPOCritic(CriticEnsemble):
     """
-    GRPO Critic using an ensemble of Q-value estimators.
+    GRPO Critic — trains to predict MC returns (not used for advantage computation).
 
-    In vanilla GRPO, the critic is optional as advantages are computed
-    relative to group averages. However, we include it for value function
-    estimation and potential hybrid approaches.
+    In vanilla GRPO, advantages come from group statistics, not the critic.
+    The critic is kept for value function estimation only.
 
     Args:
         config (MainConfig): Configuration object.
@@ -226,22 +233,21 @@ class GRPOCritic(CriticEnsemble):
 
     @torch.no_grad()
     def get_bellman_target(self):
+        """Placeholder for Bellman target computation."""
         pass
 
     def update(self, state: torch.Tensor, y: torch.Tensor) -> None:
         """
-        Updates critic using returns.
+        Updates critic to predict MC returns.
 
         Args:
             state (torch.Tensor): State inputs.
-            y (torch.Tensor): Target values.
+            y (torch.Tensor): Target values (MC returns).
         """
         self.optim.zero_grad()
         loss = self.loss(self.Q(state).view_as(y), y)
-        # Sum over the ensemble members and average over the batches
         loss = loss.sum(0).mean() if self.n_members > 1 else loss.mean()
         loss.backward()
-        # Clip gradients if necessary
         if self.config.model.critic.max_grad_norm > 0:
             nn.utils.clip_grad_norm_(
                 list(self.parameters()),
@@ -253,19 +259,24 @@ class GRPOCritic(CriticEnsemble):
 
 class GroupRelativePolicyOptimization(ActorCritic):
     """
-    Group Relative Policy Optimization (GRPO) agent.
+    Vanilla GRPO agent — no critic for advantages, group statistics as baseline.
 
-    GRPO extends PPO by using group-wise updates. The key algorithm:
-    1. Sample n_groups trajectories, each of length group_size
-    2. For each group, compute the average reward
-    3. Compute advantages as reward - group_average
-    4. Update policy using clipped surrogate loss (like PPO)
+    Collects G episodes into a structured GroupRolloutBuffer, computes MC
+    returns-to-go, normalizes across the group at each timestep (time-aligned),
+    then updates the actor with symmetric PPO clipping.
 
-    This implementation follows the vanilla GRPO algorithm while maintaining
-    compatibility with the existing codebase architecture.
+    The critic is trained to predict MC returns but is NOT used for advantage
+    computation. This is the defining difference from GRPO++ V2, which adds
+    a target critic + GAE.
 
-    Reference: DeepSeekMath: Pushing the Limits of Mathematical Reasoning
-    in Open Language Models (2024)
+    Algorithm:
+    1. Collect G sequential episodes into GroupRolloutBuffer [G, T, ...]
+    2. buf.get_batch() computes MC returns + time-aligned group advantages
+    3. Update actor with symmetric clipping, mean aggregation
+    4. Update critic to predict MC returns (optional)
+    5. Reset buffer
+
+    Reference: DeepSeekMath (2024)
     """
 
     _agent_name = "GRPO"
@@ -277,151 +288,144 @@ class GroupRelativePolicyOptimization(ActorCritic):
         actor_type: type = GRPOActor,
     ) -> None:
         """
-        Initializes the GRPO agent.
+        Initializes the vanilla GRPO agent.
 
         Args:
             config (MainConfig): Configuration dataclass instance.
             critic_type (type): Critic class type.
             actor_type (type): Actor class type.
-        Returns:
-            None
         """
         assert config.training.warmup_steps == 0, "GRPO does not support warmup steps"
         super().__init__(config, critic_type, actor_type)
 
+        self.group_size = config.model.group_size
+        self.max_episode_length = config.model.max_episode_length
+
+        # Replace the default flat ReplayBuffer with the structured group rollout buffer.
+        self.experience_memory = GroupRolloutBuffer(
+            group_size=self.group_size,
+            max_episode_length=self.max_episode_length,
+            state_dim=self.dim_state,
+            action_dim=self.dim_act,
+            device=torch.device(config.system.storing_device),
+            gamma=config.training.gamma,
+            use_identical_seeding=False,
+        )
+        self._episode_idx = 0
+        self._step_in_episode = 0
+        self._completed_episodes = 0
+
     def generate_transition(self, **kwargs):
         """
-        Generates a transition dictionary including state values and next state values.
+        Generates a transition dictionary for the group rollout buffer.
+
+        No critic values are stored — vanilla GRPO does not use V(s) for advantages.
+
+        Args:
+            **kwargs: Keyword arguments containing step data.
 
         Returns:
-            TensorDict: Transition with critic estimates.
+            TensorDict: Transition with action log-probabilities.
         """
-        transition = super().generate_transition(**kwargs)
-        with torch.no_grad():
-            # Calculate the next state value using the critic
-            next_state_value = self.critic.Q(
-                transition["next_state"].to(self.critic.device)
-            ).reshape_as(transition["reward"])
-            transition["next_state_value"] = next_state_value
-            value = self.critic.Q(
-                transition["state"].to(self.critic.device)
-            ).reshape_as(transition["reward"])
-            transition["value"] = value
-
-        transition["action_logprob"] = kwargs["action_logprob"]
+        transition = TensorDict(
+            {
+                "state": kwargs["state"],
+                "action": kwargs["action"],
+                "reward": kwargs["reward"],
+                "next_state": kwargs["next_state"],
+                "terminated": kwargs["terminated"],
+                "truncated": kwargs["truncated"],
+                "action_logprob": kwargs["action_logprob"],
+            },
+            batch_size=[],
+        )
         return transition
 
-    @torch.no_grad()
-    def calculate_group_advantages(self):
+    def store_transition(self, transition) -> None:
         """
-        Calculates advantages relative to group averages (GRPO core algorithm).
+        Writes a single transition into the group rollout buffer.
 
-        This implements the key GRPO algorithm:
-        1. Organize trajectories into groups
-        2. Compute average reward per group
-        3. Calculate advantages as reward - group_average
-        4. Optionally normalize advantages within each group
+        Sequential episodes are mapped to consecutive group slots: episode k
+        goes into group_idx = k % group_size at its own per-episode timestep.
+
+        Once all group slots are filled, additional transitions are dropped
+        until learn() is called and resets the buffer.
         """
-        batch = self.experience_memory.sample_all()
-        rewards = batch["reward"].reshape(-1, 1)
-        terminated = batch["terminated"].reshape_as(rewards)
-        value = batch["value"].reshape_as(rewards)
-        next_value = batch["next_state_value"].reshape_as(rewards)
+        if self._completed_episodes >= self.group_size:
+            return
 
-        # Calculate GAE estimates for value-based baseline
-        advantages = torch.zeros_like(rewards)
-        last_gaelambda = 0.0
-        for t in reversed(range(len(advantages))):
-            delta = (
-                rewards[t]
-                + self._gamma * next_value[t] * (1 - terminated[t])
-                - value[t]
-            )
-            advantages[t] = last_gaelambda = (
-                delta
-                + self._gamma
-                * self.config.model.GAE_lambda
-                * last_gaelambda
-                * (1 - terminated[t])
-            )
+        buf = self.experience_memory
+        group_idx = self._episode_idx % self.group_size
+        t = self._step_in_episode
 
-        returns = advantages + value
+        terminated = bool(transition["terminated"])
+        truncated = bool(transition["truncated"])
+        episode_end = terminated or truncated
 
-        # GRPO: Group-wise relative advantages
-        n_groups = self.config.model.n_groups
-        group_size = self.config.model.group_size
-        total_trajectories = len(advantages)
+        if t < self.max_episode_length:
+            buf_device = buf.device
+            buf.states[group_idx, t] = transition["state"].to(buf_device)
+            buf.actions[group_idx, t] = transition["action"].to(buf_device)
+            buf.logprobs[group_idx, t] = transition["action_logprob"].to(buf_device)
+            buf.rewards[group_idx, t] = float(transition["reward"])
+            buf.terminated[group_idx, t] = terminated
+            buf.valid_mask[group_idx, t] = True
+            buf.current_lengths[group_idx] = t + 1
 
-        # Reshape into groups
-        n_trajectories = total_trajectories
-        group_size_actual = max(1, n_trajectories // n_groups)
+        self._step_in_episode += 1
 
-        # Calculate group-based advantages
-        # For vanilla GRPO, we use the group average as baseline
-        group_advantages = advantages.clone()
-
-        # Normalize within groups if configured
-        if self.config.model.normalize_advantages and n_trajectories > 1:
-            # Simple approach: normalize all advantages together
-            # (more sophisticated group-wise normalization can be added)
-            group_advantages = (group_advantages - group_advantages.mean()) / (group_advantages.std() + 1e-8)
-
-        # Handle storage for advantages and returns
-        batch["advantages"] = group_advantages.reshape(-1)
-        batch["returns"] = returns.reshape(-1)
-
-        # Clean up the memory
-        self.experience_memory.reset()
-        # Store the updated batch back into the experience memory
-        batch_transition = TensorDict(
-            dict(batch),
-            batch_size=[group_advantages.shape[0]],
-        )
-        # Add the batch to the experience memory
-        self.experience_memory.add_batch(batch_transition)
+        if episode_end:
+            self._completed_episodes += 1
+            self._episode_idx += 1
+            self._step_in_episode = 0
 
     def learn(self, max_iter: int = 1, n_epochs: int = 0) -> None:
         """
-        Learns from experience memory using GRPO update rules.
+        Learns from the group rollout buffer using MC returns + group normalization.
+
+        Gated on collecting at least ``group_size`` completed episodes so that
+        every group slot holds a real trajectory before advantage normalization.
 
         Args:
-            max_iter (int): Maximum number of update iterations.
-            n_epochs (int): Number of passes over the memory.
+            max_iter (int): Maximum number of update iterations (unused, kept for API compat).
+            n_epochs (int): Number of passes over the collected group batch.
         """
-        # Check if there is enough data in memory to sample a batch
-        if self.config_train.batch_size > len(
-            self.experience_memory
-        ) and self.config.training.learn_frequency > len(self.experience_memory):
+        if self._completed_episodes < self.group_size:
             return None
 
-        # Calculate group advantages (GRPO-specific)
-        self.calculate_group_advantages()
+        buf = self.experience_memory
+        compute_device = torch.device(self.config.system.device)
 
-        # Determine the number of steps and initialize the iterator
-        n_steps = self.experience_memory.get_steps_and_iterator(
-            n_epochs, max_iter, self.config_train.batch_size
-        )
+        # Get batch with MC returns + time-aligned group advantages (computed in buffer)
+        batch = buf.get_batch()
 
-        for _ in range(n_steps):
-            # Get batch using the internal iterator
-            batch = self.experience_memory.get_next_batch(self.config_train.batch_size)
+        # Flatten [G, T, ...] -> [G*T, ...]
+        group_size, max_len = batch["state"].shape[:2]
+        if isinstance(self.dim_state, tuple):
+            states_flat = batch["state"].reshape(group_size * max_len, *self.dim_state)
+        else:
+            states_flat = batch["state"].reshape(group_size * max_len, *buf.state_shape)
+        actions_flat = batch["action"].reshape(group_size * max_len, -1)
+        logprobs_flat = batch["logprob"].reshape(group_size * max_len)
+        advantages_flat = batch["advantages"].reshape(group_size * max_len)
+        returns_flat = batch["returns"].reshape(group_size * max_len)
 
-            # Update the actor network periodically
-            self.actor.update(
-                batch["state"],
-                batch["action"],
-                batch["action_logprob"],
-                batch["advantages"],
-            )
+        states_flat = states_flat.to(compute_device)
+        actions_flat = actions_flat.to(compute_device)
+        logprobs_flat = logprobs_flat.to(compute_device)
+        advantages_flat = advantages_flat.to(compute_device)
+        returns_flat = returns_flat.to(compute_device)
 
-            self.critic.update(
-                batch["state"],
-                batch["returns"],
-            )
-
+        n_passes = max(1, n_epochs)
+        for _ in range(n_passes):
+            self.actor.update(states_flat, actions_flat, logprobs_flat, advantages_flat)
+            self.critic.update(states_flat, returns_flat)
             self.n_iter += 1
 
-        # Reset the experience memory after learning
-        self.experience_memory.reset()
+        # Reset the buffer after learning (on-policy algorithm).
+        buf.reset()
+        self._episode_idx = 0
+        self._step_in_episode = 0
+        self._completed_episodes = 0
 
         return None
