@@ -1,51 +1,3 @@
-# -----------------------------------------------------------------------------------
-# ObjectRL: An Object-Oriented Reinforcement Learning Codebase
-# Copyright (C) 2025 ADIN Lab
-
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <https://www.gnu.org/licenses/>.
-# -----------------------------------------------------------------------------------
-
-"""
-Group Relative Policy Optimization Plus Plus V2 (GRPO++ V2) Implementation.
-
-GRPO++ V2 extends GRPO++ by replacing pure Monte Carlo returns with GAE
-(Generalized Advantage Estimation) using a learned value function with
-a target network.
-
-Key innovations over GRPO++:
-
-1. **GAE with Target Critic**: Uses a learned V(s) from a target critic network
-   to compute TD residuals, then accumulates GAE for lower-variance advantage
-   estimates compared to pure Monte Carlo returns.
-
-2. **Group-Normalized GAE**: After computing GAE, normalizes across the group
-   dimension at each timestep, preserving the GRPO insight of relative comparison.
-
-3. **DAPO Asymmetric Clipping**: Inherited from GRPO++ (tighter bound for
-   positive advantages, looser for negative).
-
-4. **Dr. GRPO Aggregation**: Inherited from GRPO++ (sum over time, mean over group).
-
-5. **Target Network**: Critic uses Polyak-averaged target for stable V(s) estimates
-   during GAE computation (same principle as TD3/SAC).
-
-Core formula:
-    delta_{i,t} = r_{i,t} + gamma * V_target(s_{i,t+1}) * (1 - done) - V_target(s_{i,t})
-    GAE_{i,t}   = delta_{i,t} + gamma * lambda * GAE_{i,t+1} * (1 - done)
-    A_{i,t}     = (GAE_{i,t} - mean_j(GAE_{j,t})) / (std_j(GAE_{j,t}) + eps)
-"""
-
 from typing import Optional
 
 import torch
@@ -62,21 +14,6 @@ if __name__ == "__main__":
 
 
 class GRPOPlusV2Actor(Actor):
-    """
-    GRPO++ V2 Actor with DAPO asymmetric clipping and Dr. GRPO aggregation.
-
-    Simplified from GRPOPlusActor:
-    - Removes AdaptiveNormalizer (GAE already handles variance reduction)
-    - Keeps DAPO asymmetric clipping (same as GRPO++)
-    - Keeps Dr. GRPO aggregation (sum over time, mean over group)
-    - Keeps entropy regularization support
-
-    Args:
-        config (MainConfig): Configuration object.
-        dim_state (int): Dimension of state space.
-        dim_act (int): Dimension of action space.
-    """
-
     def __init__(self, config: "MainConfig", dim_state: int, dim_act: int) -> None:
         super().__init__(config, dim_state, dim_act)
 
@@ -433,6 +370,7 @@ class GRPOPlusV2(ActorCritic):
         compute_device = torch.device(self.config.system.device)
 
         # Get raw data from buffer (NOT using buf.get_batch which computes MC advantages)
+        # We will compute GAE advantages ourselves using the target critic for stable V(s) estimates.
         states = buf.states.to(compute_device)
         actions = buf.actions.to(compute_device)
         logprobs = buf.logprobs.to(compute_device)
